@@ -2,8 +2,8 @@
 This module provides an API client to invoke APIs deployed on the Unstract platform.
 
 Classes:
-    APIClient: A class to invoke APIs deployed on the Unstract platform.
-    APIClientException: A class to handle exceptions raised by the APIClient class.
+    APIDeploymentsClient: A class to invoke APIs deployed on the Unstract platform.
+    APIDeploymentsClientException: A class to handle exceptions raised by the APIDeploymentsClient class.
 """
 import logging
 import os

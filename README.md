@@ -1,7 +1,7 @@
 # unstract-python-client
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/unstract-client)](https://pypi.org/project/unstract-client/)
 [![Python Version from PEP 621 TOML](https://img.shields.io/python/required-version-toml?tomlFilePath=https%3A%2F%2Fraw.githubusercontent.com%2FZipstack%2Funstract-python-client%2Fmain%2Fpyproject.toml)
-](https://pypi.org/project/llmwhisperer-client/)
+](https://pypi.org/project/unstract-client/)
 [![PyPI - Version](https://img.shields.io/pypi/v/unstract-client)](https://pypi.org/project/unstract-client/)
 
 Python client for the Unstract LLM-powered structured data extraction platform

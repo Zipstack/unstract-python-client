@@ -5,14 +5,15 @@ Classes:
     APIDeploymentsClient: A class to invoke APIs deployed on the Unstract platform.
     APIDeploymentsClientException: A class to handle exceptions raised by the APIDeploymentsClient class.
 """
+
 import logging
+import ntpath
 import os
+from urllib.parse import parse_qs, urlparse
 
 import requests
-import ntpath
-from urllib.parse import urlparse, parse_qs
 
-from src.unstract.api_deployments.utils import UnstractUtils
+from unstract.api_deployments.utils import UnstractUtils
 
 
 class APIDeploymentsClientException(Exception):
@@ -35,7 +36,10 @@ class APIDeploymentsClient:
     """
     A class to invoke APIs deployed on the Unstract platform.
     """
-    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
     logger = logging.getLogger(__name__)
     log_stream_handler = logging.StreamHandler()
     log_stream_handler.setFormatter(formatter)
@@ -45,11 +49,11 @@ class APIDeploymentsClient:
     api_timeout = 300
 
     def __init__(
-            self,
-            api_url: str,
-            api_key: str,
-            api_timeout: int = 300,
-            logging_level: str = "INFO",
+        self,
+        api_url: str,
+        api_key: str,
+        api_timeout: int = 300,
+        logging_level: str = "INFO",
     ):
         """
         Initializes the APIClient class.
@@ -74,7 +78,7 @@ class APIDeploymentsClient:
         self.logger.debug("Logging level set to: " + logging_level)
 
         if api_key == "":
-            self.api_key = os.getenv("UNSTRACT_API_DEPLOYMENT_KEY")
+            self.api_key = os.getenv("UNSTRACT_API_DEPLOYMENT_KEY", "")
         else:
             self.api_key = api_key
         self.logger.debug("API key set to: " + UnstractUtils.redact_key(self.api_key))
@@ -111,15 +115,20 @@ class APIDeploymentsClient:
             "Authorization": "Bearer " + self.api_key,
         }
 
-        data = {
-            "timeout": self.api_timeout
-        }
+        data = {"timeout": self.api_timeout}
 
         files = []
 
         try:
             for file_path in file_paths:
-                record = ('files', (ntpath.basename(file_path), open(file_path, "rb"), 'application/octet-stream'))
+                record = (
+                    "files",
+                    (
+                        ntpath.basename(file_path),
+                        open(file_path, "rb"),
+                        "application/octet-stream",
+                    ),
+                )
                 files.append(record)
         except FileNotFoundError as e:
             raise APIDeploymentsClientException("File not found: " + str(e))
@@ -132,17 +141,37 @@ class APIDeploymentsClient:
         )
         self.logger.debug(response.status_code)
         self.logger.debug(response.text)
-
         # The returned object is wrapped in a "message" key. Let's simplify the response.
-        obj_to_return = {"pending": False, "execution_status": response.json()["message"]["execution_status"],
-                         "error": response.json()["message"]["error"],
-                         "extraction_result": response.json()["message"]["result"],
-                         "status_code": response.status_code}
+        obj_to_return = {}
+
+        if response.status_code == 401:
+            obj_to_return = {
+                "pending": False,
+                "execution_status": "",
+                "error": response.json()["errors"][0]["detail"],
+                "extraction_result": "",
+                "status_code": response.status_code,
+            }
+            return obj_to_return
 
         # If the execution status is pending, extract the execution ID from the response
         # and return it in the response. Later, users can use the execution ID to check the status of the execution.
-        if 200 <= response.status_code < 300 and obj_to_return["execution_status"] == "PENDING":
-            obj_to_return["status_check_api_endpoint"] = response.json()["message"]["status_api"]
+        # The returned object is wrapped in a "message" key. Let's simplify the response.
+        obj_to_return = {
+            "pending": False,
+            "execution_status": response.json()["message"]["execution_status"],
+            "error": response.json()["message"]["error"],
+            "extraction_result": response.json()["message"]["result"],
+            "status_code": response.status_code,
+        }
+        if (
+            200 <= response.status_code < 300
+            and obj_to_return["execution_status"] == "PENDING"
+        ):
+
+            obj_to_return["status_check_api_endpoint"] = response.json()["message"][
+                "status_api"
+            ]
             obj_to_return["pending"] = True
 
         return obj_to_return
@@ -169,16 +198,25 @@ class APIDeploymentsClient:
         )
         self.logger.debug(response.status_code)
         self.logger.debug(response.text)
-        obj_to_return = {"pending": False, "execution_status": response.json()["status"],
-                         "status_code": response.status_code, "message": response.json()["message"]}
+        obj_to_return = {
+            "pending": False,
+            "execution_status": response.json()["status"],
+            "status_code": response.status_code,
+            "message": response.json()["message"],
+        }
 
         # If the execution status is pending, extract the execution ID from the response
         # and return it in the response. Later, users can use the execution ID to check the status of the execution.
-        if 200 <= response.status_code < 500 and obj_to_return["execution_status"] == "PENDING":
+        if (
+            200 <= response.status_code < 500
+            and obj_to_return["execution_status"] == "PENDING"
+        ):
             obj_to_return["pending"] = True
 
-        if 200 <= response.status_code < 300 and obj_to_return["execution_status"] == "SUCCESS":
+        if (
+            200 <= response.status_code < 300
+            and obj_to_return["execution_status"] == "SUCCESS"
+        ):
             obj_to_return["extraction_result"] = response.json()["message"]
 
         return obj_to_return
-

@@ -4,7 +4,7 @@
 # - Added pkgs feature flag auto generated code to flake8 exclude list
 # Force all unspecified python hooks to run python 3.10
 default_language_version:
-  python: python3.11
+  python: python3.9
 default_stages:
   - commit
 repos:

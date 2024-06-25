@@ -6,11 +6,11 @@ Classes:
     APIDeploymentsClientException: A class to handle exceptions raised by the APIDeploymentsClient class.
 """
 import logging
+import ntpath
 import os
+from urllib.parse import parse_qs, urlparse
 
 import requests
-import ntpath
-from urllib.parse import urlparse, parse_qs
 
 from src.unstract.api_deployments.utils import UnstractUtils
 

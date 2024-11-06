@@ -63,7 +63,7 @@ except APIDeploymentsClientException as e:
 
 `api_timeout`: Set a timeout for API requests, e.g., `api_timeout=10`.
 `logging_level`: Set logging verbosity (e.g., "`DEBUG`").
-`include_metadata`: If set to `True`, the response will include additional metadata for each calls in the structured output, providing context of the results.
+`include_metadata`: If set to `True`, the response will include additional metadata (cost, tokens consumed and context) for each call made by the Prompt Studio exported tool.
 
 
 ## Questions and Feedback

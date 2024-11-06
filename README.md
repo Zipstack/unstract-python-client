@@ -38,6 +38,7 @@ try:
         api_key=os.getenv("UNSTRACT_API_DEPLOYMENT_KEY"),
         api_timeout=10,
         logging_level="DEBUG",
+        include_metadata=False # optional
     )
     # Replace files with pdfs
     response = adc.structure_file(
@@ -57,6 +58,12 @@ try:
 except APIDeploymentsClientException as e:
     print(e)
 ```
+
+## Parameter Details
+
+`api_timeout`: Set a timeout for API requests, e.g., `api_timeout=10`.
+`logging_level`: Set logging verbosity (e.g., "`DEBUG`").
+`include_metadata`: If set to `True`, the response will include additional metadata for each calls in the structured output, providing context of the results.
 
 
 ## Questions and Feedback

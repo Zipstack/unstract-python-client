@@ -1,25 +1,25 @@
-"""
-This module provides an API client to invoke APIs deployed on the Unstract platform.
+"""This module provides an API client to invoke APIs deployed on the Unstract
+platform.
 
 Classes:
     APIDeploymentsClient: A class to invoke APIs deployed on the Unstract platform.
-    APIDeploymentsClientException: A class to handle exceptions raised by the APIDeploymentsClient class.
+    APIDeploymentsClientException: A class to handle exceptions raised by the
+        APIDeploymentsClient class.
 """
 
 import logging
 import ntpath
 import os
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 import requests
+from requests.exceptions import JSONDecodeError
 
 from unstract.api_deployments.utils import UnstractUtils
 
 
 class APIDeploymentsClientException(Exception):
-    """
-    A class to handle exceptions raised by the APIClient class.
-    """
+    """A class to handle exceptions raised by the APIClient class."""
 
     def __init__(self, message):
         def __init__(self, value):
@@ -33,9 +33,7 @@ class APIDeploymentsClientException(Exception):
 
 
 class APIDeploymentsClient:
-    """
-    A class to invoke APIs deployed on the Unstract platform.
-    """
+    """A class to invoke APIs deployed on the Unstract platform."""
 
     formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -47,6 +45,7 @@ class APIDeploymentsClient:
 
     api_key = ""
     api_timeout = 300
+    in_progress_statuses = ["PENDING", "EXECUTING", "READY", "QUEUED", "INITIATED"]
 
     def __init__(
         self,
@@ -54,9 +53,9 @@ class APIDeploymentsClient:
         api_key: str,
         api_timeout: int = 300,
         logging_level: str = "INFO",
+        include_metadata: bool = False,
     ):
-        """
-        Initializes the APIClient class.
+        """Initializes the APIClient class.
 
         Args:
             api_key (str): The API key to authenticate the API request.
@@ -86,10 +85,10 @@ class APIDeploymentsClient:
         self.api_timeout = api_timeout
         self.api_url = api_url
         self.__save_base_url(api_url)
+        self.include_metadata = include_metadata
 
     def __save_base_url(self, full_url: str):
-        """
-        Extracts the base URL from the full URL and saves it.
+        """Extracts the base URL from the full URL and saves it.
 
         Args:
             full_url (str): The full URL of the API.
@@ -99,8 +98,7 @@ class APIDeploymentsClient:
         self.logger.debug("Base URL: " + self.base_url)
 
     def structure_file(self, file_paths: list[str]) -> dict:
-        """
-        Invokes the API deployed on the Unstract platform.
+        """Invokes the API deployed on the Unstract platform.
 
         Args:
             file_paths (list[str]): The file path to the file to be uploaded.
@@ -115,7 +113,7 @@ class APIDeploymentsClient:
             "Authorization": "Bearer " + self.api_key,
         }
 
-        data = {"timeout": self.api_timeout}
+        data = {"timeout": self.api_timeout, "include_metadata": self.include_metadata}
 
         files = []
 
@@ -141,47 +139,75 @@ class APIDeploymentsClient:
         )
         self.logger.debug(response.status_code)
         self.logger.debug(response.text)
-        # The returned object is wrapped in a "message" key. Let's simplify the response.
+        # The returned object is wrapped in a "message" key.
+        # Let's simplify the response.
         obj_to_return = {}
 
-        if response.status_code == 401:
+        try:
+            response_data = response.json()
+            response_message = response_data.get("message", {})
+        except JSONDecodeError:
+            self.logger.error(
+                "Failed to decode JSON response. Raw response: %s",
+                response.text,
+                exc_info=True,
+            )
             obj_to_return = {
+                "status_code": response.status_code,
                 "pending": False,
                 "execution_status": "",
-                "error": response.json()["errors"][0]["detail"],
+                "error": "Invalid JSON response from API",
                 "extraction_result": "",
+            }
+            return obj_to_return
+        if response.status_code == 401:
+            obj_to_return = {
                 "status_code": response.status_code,
+                "pending": False,
+                "execution_status": "",
+                "error": response_data.get("errors", [{}])[0].get(
+                    "detail", "Unauthorized"
+                ),
+                "extraction_result": "",
             }
             return obj_to_return
 
-        # If the execution status is pending, extract the execution ID from the response
-        # and return it in the response. Later, users can use the execution ID to check the status of the execution.
-        # The returned object is wrapped in a "message" key. Let's simplify the response.
-        obj_to_return = {
-            "pending": False,
-            "execution_status": response.json()["message"]["execution_status"],
-            "error": response.json()["message"]["error"],
-            "extraction_result": response.json()["message"]["result"],
-            "status_code": response.status_code,
-        }
-        if (
-            200 <= response.status_code < 300
-            and obj_to_return["execution_status"] == "PENDING"
-        ):
+        # If the execution status is pending, extract the execution ID from
+        # the response and return it in the response.
+        # Later, users can use the execution ID to check the status of the execution.
+        # The returned object is wrapped in a "message" key.
+        # Let's simplify the response.
+        # Construct response object
+        execution_status = response_message.get("execution_status", "")
+        error_message = response_message.get("error", "")
+        extraction_result = response_message.get("result", "")
+        status_api_endpoint = response_message.get("status_api")
 
-            obj_to_return["status_check_api_endpoint"] = response.json()["message"][
-                "status_api"
-            ]
-            obj_to_return["pending"] = True
+        obj_to_return = {
+            "status_code": response.status_code,
+            "pending": False,
+            "execution_status": execution_status,
+            "error": error_message,
+            "extraction_result": extraction_result,
+        }
+
+        # Check if the status is pending or if it's successful but lacks a result
+        if 200 <= response.status_code < 300:
+            if execution_status in self.in_progress_statuses or (
+                execution_status == "SUCCESS" and not extraction_result
+            ):
+                obj_to_return.update(
+                    {"status_check_api_endpoint": status_api_endpoint, "pending": True}
+                )
 
         return obj_to_return
 
     def check_execution_status(self, status_check_api_endpoint: str) -> dict:
-        """
-        Checks the status of the execution.
+        """Checks the status of the execution.
 
         Args:
-            status_check_api_endpoint (str): The API endpoint to check the status of the execution.
+            status_check_api_endpoint (str):
+                The API endpoint to check the status of the execution.
 
         Returns:
             dict: The response from the API.
@@ -195,28 +221,50 @@ class APIDeploymentsClient:
         response = requests.get(
             status_call_url,
             headers=headers,
+            params={"include_metadata": self.include_metadata},
         )
         self.logger.debug(response.status_code)
         self.logger.debug(response.text)
+
+        obj_to_return = {}
+
+        try:
+            response_data = response.json()
+        except JSONDecodeError:
+            self.logger.error(
+                "Failed to decode JSON response. Raw response: %s",
+                response.text,
+                exc_info=True,
+            )
+            obj_to_return = {
+                "status_code": response.status_code,
+                "pending": False,
+                "execution_status": "",
+                "error": "Invalid JSON response from API",
+                "extraction_result": "",
+            }
+            return obj_to_return
+
+        # Construct response object
+        execution_status = response_data.get("status", "")
+        error_message = response_data.get("error", "")
+        extraction_result = response_data.get("message", "")
+
         obj_to_return = {
-            "pending": False,
-            "execution_status": response.json()["status"],
             "status_code": response.status_code,
-            "message": response.json()["message"],
+            "pending": False,
+            "execution_status": execution_status,
+            "error": error_message,
+            "extraction_result": extraction_result,
         }
 
         # If the execution status is pending, extract the execution ID from the response
-        # and return it in the response. Later, users can use the execution ID to check the status of the execution.
+        # and return it in the response.
+        # Later, users can use the execution ID to check the status of the execution.
         if (
             200 <= response.status_code < 500
-            and obj_to_return["execution_status"] == "PENDING"
+            and obj_to_return["execution_status"] in self.in_progress_statuses
         ):
             obj_to_return["pending"] = True
-
-        if (
-            200 <= response.status_code < 300
-            and obj_to_return["execution_status"] == "SUCCESS"
-        ):
-            obj_to_return["extraction_result"] = response.json()["message"]
 
         return obj_to_return

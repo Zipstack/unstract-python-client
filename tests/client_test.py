@@ -1,13 +1,15 @@
-import time
 import os
+import time
+
+import dotenv
 
 from unstract.api_deployments.client import (
     APIDeploymentsClient,
     APIDeploymentsClientException,
 )
-import dotenv
 
 dotenv.load_dotenv()
+
 
 def main():
     try:
@@ -16,11 +18,10 @@ def main():
             api_key=os.getenv("UNSTRACT_API_DEPLOYMENT_KEY"),
             api_timeout=10,
             logging_level="DEBUG",
+            include_metadata=False,
         )
         # Replace files with pdfs
-        response = adc.structure_file(
-            ["<files>"]
-        )
+        response = adc.structure_file(["<files>"])
         print(response)
         if response["pending"]:
             while True:

@@ -49,7 +49,7 @@ source = "file"
 path = "src/unstract/api_deployments/__init__.py"
 
 [tool.isort]
-line_length = 120
+line_length = 88
 multi_line_output = 3
 include_trailing_comma = true
 force_grid_wrap = 0
@@ -58,7 +58,7 @@ ensure_newline_before_comments = true
 profile = "black"
 
 [tool.flake8]
-max-line-length = 120
+max-line-length = 88
 
 [tool.pdm.build]
 includes = ["src"]

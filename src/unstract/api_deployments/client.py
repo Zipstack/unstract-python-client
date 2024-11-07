@@ -147,7 +147,11 @@ class APIDeploymentsClient:
             response_data = response.json()
             response_message = response_data.get("message", {})
         except JSONDecodeError:
-            self.logger.error("Failed to decode JSON response", exc_info=True)
+            self.logger.error(
+                "Failed to decode JSON response. Raw response: %s",
+                response.text,
+                exc_info=True,
+            )
             obj_to_return = {
                 "status_code": response.status_code,
                 "pending": False,
@@ -227,7 +231,11 @@ class APIDeploymentsClient:
         try:
             response_data = response.json()
         except JSONDecodeError:
-            self.logger.error("Failed to decode JSON response", exc_info=True)
+            self.logger.error(
+                "Failed to decode JSON response. Raw response: %s",
+                response.text,
+                exc_info=True,
+            )
             obj_to_return = {
                 "status_code": response.status_code,
                 "pending": False,

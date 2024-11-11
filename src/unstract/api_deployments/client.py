@@ -54,6 +54,7 @@ class APIDeploymentsClient:
         api_timeout: int = 300,
         logging_level: str = "INFO",
         include_metadata: bool = False,
+        verify: bool = True
     ):
         """Initializes the APIClient class.
 
@@ -86,6 +87,7 @@ class APIDeploymentsClient:
         self.api_url = api_url
         self.__save_base_url(api_url)
         self.include_metadata = include_metadata
+        self.verify = verify
 
     def __save_base_url(self, full_url: str):
         """Extracts the base URL from the full URL and saves it.
@@ -136,6 +138,7 @@ class APIDeploymentsClient:
             headers=headers,
             data=data,
             files=files,
+            verify=self.verify,
         )
         self.logger.debug(response.status_code)
         self.logger.debug(response.text)
@@ -222,6 +225,7 @@ class APIDeploymentsClient:
             status_call_url,
             headers=headers,
             params={"include_metadata": self.include_metadata},
+            verify=self.verify,
         )
         self.logger.debug(response.status_code)
         self.logger.debug(response.text)

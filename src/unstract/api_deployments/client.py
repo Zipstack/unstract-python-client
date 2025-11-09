@@ -10,6 +10,7 @@ Classes:
 import logging
 import ntpath
 import os
+import json
 from urllib.parse import urlparse
 
 import requests
@@ -99,11 +100,12 @@ class APIDeploymentsClient:
         self.base_url = parsed_url.scheme + "://" + parsed_url.netloc
         self.logger.debug("Base URL: " + self.base_url)
 
-    def structure_file(self, file_paths: list[str]) -> dict:
+    def structure_file(self, file_paths: list[str], custom_data: dict = None) -> dict:
         """Invokes the API deployed on the Unstract platform.
 
         Args:
             file_paths (list[str]): The file path to the file to be uploaded.
+            custom_data (dict, optional): Custom data to send with the request.
 
         Returns:
             dict: The response from the API.
@@ -116,6 +118,10 @@ class APIDeploymentsClient:
         }
 
         data = {"timeout": self.api_timeout, "include_metadata": self.include_metadata}
+        # Add custom_data if provided
+        if custom_data is not None:
+            data["custom_data"] = json.dumps(custom_data) if isinstance(custom_data, dict) else custom_data
+            self.logger.debug("Custom data added to request")
 
         files = []
 

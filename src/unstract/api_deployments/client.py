@@ -137,6 +137,7 @@ class APIDeploymentsClient:
         exp_delay = min(
             self.initial_delay * (self.backoff_factor**attempt), self.max_delay
         )
+        # Full jitter: randomize between 0 and exp_delay to avoid thundering herd
         return random.uniform(0, exp_delay)
 
     def _get_retry_delay(self, response, attempt: int) -> float:

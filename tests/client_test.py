@@ -16,12 +16,12 @@ def main():
         adc = APIDeploymentsClient(
             api_url=os.getenv("API_URL"),
             api_key=os.getenv("UNSTRACT_API_DEPLOYMENT_KEY"),
-            api_timeout=10,
+            api_timeout=0,
             logging_level="DEBUG",
             include_metadata=False,
         )
-        # Replace files with pdfs
-        response = adc.structure_file(["<files>"])
+        file_paths = os.getenv("TEST_FILES", "").split(",")
+        response = adc.structure_file(file_paths)
         print(response)
         if response["pending"]:
             while True:

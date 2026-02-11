@@ -6,7 +6,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 from requests.exceptions import ConnectionError, Timeout
 
-from unstract.api_deployments.client import APIDeploymentsClient
+from unstract.api_deployments.client import (
+    APIDeploymentsClient,
+    _WaitRetryAfterOrExponentialJitter,
+)
 
 
 @pytest.fixture
@@ -57,6 +60,7 @@ class TestConstructorDefaults:
         assert c.initial_delay == 2.0
         assert c.max_delay == 60.0
         assert c.backoff_factor == 2.0
+        assert c.jitter == 1.0
 
     def test_custom_retry_params(self):
         c = APIDeploymentsClient(
@@ -120,38 +124,90 @@ class TestIsRetryableStatus:
         assert client._is_retryable_status(201) is False
 
 
-# ── _calculate_delay ──
+# ── _WaitRetryAfterOrExponentialJitter ──
 
 
-class TestCalculateDelay:
-    def test_delay_within_bounds(self, client):
-        for attempt in range(5):
-            delay = client._calculate_delay(attempt)
-            assert 0 <= delay <= client.max_delay
+class TestWaitStrategy:
+    """Tests for the custom tenacity wait strategy."""
 
-    def test_delay_exponential_growth_upper_bound(self, client):
-        """Upper bound of jitter grows exponentially."""
-        upper_0 = client.initial_delay * (client.backoff_factor**0)
-        upper_1 = client.initial_delay * (client.backoff_factor**1)
-        assert upper_1 > upper_0
+    def _make_retry_state(self, attempt_number, result=None, exception=None):
+        """Create a minimal mock RetryCallState for testing the wait
+        strategy."""
+        rs = MagicMock()
+        rs.attempt_number = attempt_number
+        outcome = MagicMock()
+        if exception is not None:
+            outcome.failed = True
+            outcome.exception.return_value = exception
+        else:
+            outcome.failed = False
+            outcome.result.return_value = result
+        rs.outcome = outcome
+        return rs
+
+    def test_delay_within_bounds(self):
+        """Additive jitter: delay in [initial, initial + jitter] at attempt 1."""
+        wait = _WaitRetryAfterOrExponentialJitter(
+            initial=2.0, max=60.0, exp_base=2.0, jitter=1.0
+        )
+        resp = MagicMock(status_code=500, headers={})
+        for _ in range(50):
+            rs = self._make_retry_state(attempt_number=1, result=resp)
+            delay = wait(rs)
+            # At attempt 1: base = initial * exp_base^0 = 2.0, jitter up to 1.0
+            assert 2.0 <= delay <= 3.0
+
+    def test_delay_exponential_growth(self):
+        """Higher attempts produce larger base delays."""
+        wait = _WaitRetryAfterOrExponentialJitter(
+            initial=2.0, max=60.0, exp_base=2.0, jitter=0.0
+        )
+        resp = MagicMock(status_code=500, headers={})
+        rs1 = self._make_retry_state(attempt_number=1, result=resp)
+        rs2 = self._make_retry_state(attempt_number=2, result=resp)
+        delay1 = wait(rs1)
+        delay2 = wait(rs2)
+        assert delay2 > delay1
 
     def test_delay_capped_at_max(self):
-        c = APIDeploymentsClient(
-            api_url="https://api.example.com/v1/deploy",
-            api_key="test-key",
-            initial_delay=10.0,
-            max_delay=5.0,
-            backoff_factor=10.0,
+        wait = _WaitRetryAfterOrExponentialJitter(
+            initial=10.0, max=5.0, exp_base=10.0, jitter=0.0
         )
-        for _ in range(100):
-            delay = c._calculate_delay(10)
-            assert delay <= c.max_delay
+        resp = MagicMock(status_code=500, headers={})
+        for attempt in range(1, 10):
+            rs = self._make_retry_state(attempt_number=attempt, result=resp)
+            delay = wait(rs)
+            assert delay <= 5.0 + 1e-9  # max + float tolerance
 
-    def test_delay_zero_attempt(self, client):
-        """Attempt 0: delay between 0 and initial_delay."""
-        for _ in range(50):
-            delay = client._calculate_delay(0)
-            assert 0 <= delay <= client.initial_delay
+    def test_retry_after_header_respected(self):
+        """429 with valid Retry-After returns that value."""
+        wait = _WaitRetryAfterOrExponentialJitter(
+            initial=2.0, max=60.0, exp_base=2.0, jitter=1.0
+        )
+        resp = MagicMock(status_code=429, headers={"Retry-After": "7"})
+        rs = self._make_retry_state(attempt_number=1, result=resp)
+        assert wait(rs) == 7.0
+
+    def test_retry_after_invalid_falls_back(self):
+        """429 with invalid Retry-After falls back to exponential jitter."""
+        wait = _WaitRetryAfterOrExponentialJitter(
+            initial=2.0, max=60.0, exp_base=2.0, jitter=1.0
+        )
+        resp = MagicMock(status_code=429, headers={"Retry-After": "bad"})
+        rs = self._make_retry_state(attempt_number=1, result=resp)
+        delay = wait(rs)
+        assert 2.0 <= delay <= 3.0
+
+    def test_exception_outcome_uses_exponential(self):
+        """When the outcome is an exception, exponential jitter is used."""
+        wait = _WaitRetryAfterOrExponentialJitter(
+            initial=2.0, max=60.0, exp_base=2.0, jitter=1.0
+        )
+        rs = self._make_retry_state(
+            attempt_number=1, exception=ConnectionError("fail")
+        )
+        delay = wait(rs)
+        assert 2.0 <= delay <= 3.0
 
 
 # ── _request_with_retry: successful requests ──
@@ -372,10 +428,10 @@ class TestRetryAfterHeader:
         ]
         resp = client._request_with_retry("GET", "https://api.example.com/test")
         assert resp.status_code == 200
-        # Should have used _calculate_delay fallback (some float >= 0)
+        # Should have used exponential jitter fallback (additive: >= initial_delay)
         assert mock_sleep.call_count == 1
         delay_used = mock_sleep.call_args[0][0]
-        assert delay_used >= 0
+        assert delay_used >= client.initial_delay
 
 
 # ── File seek on retry ──

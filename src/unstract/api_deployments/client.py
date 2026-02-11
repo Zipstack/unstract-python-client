@@ -10,12 +10,20 @@ Classes:
 import logging
 import ntpath
 import os
-import random
 import time
 from urllib.parse import urlparse
 
 import requests
 from requests.exceptions import ConnectionError, JSONDecodeError, Timeout
+from tenacity import (
+    RetryCallState,
+    Retrying,
+    retry_if_exception_type,
+    retry_if_result,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
+from tenacity.wait import wait_base
 
 from unstract.api_deployments.utils import UnstractUtils
 
@@ -32,6 +40,43 @@ class APIDeploymentsClientException(Exception):
 
         def error_message(self):
             return self.value
+
+
+class _WaitRetryAfterOrExponentialJitter(wait_base):
+    """Wait strategy that respects Retry-After on 429, else exponential jitter.
+
+    For 429 responses with a valid ``Retry-After`` header the server-requested
+    delay is used.  In every other case the strategy delegates to
+    ``wait_exponential_jitter`` (additive jitter).
+    """
+
+    def __init__(
+        self,
+        initial: float,
+        max: float,
+        exp_base: float,
+        jitter: float,
+    ) -> None:
+        super().__init__()
+        self._exp_jitter = wait_exponential_jitter(
+            initial=initial, max=max, exp_base=exp_base, jitter=jitter
+        )
+
+    def __call__(self, retry_state: RetryCallState) -> float:
+        outcome = retry_state.outcome
+        if outcome and not outcome.failed:
+            response = outcome.result()
+            if (
+                response is not None
+                and getattr(response, "status_code", None) == 429
+            ):
+                retry_after = response.headers.get("Retry-After")
+                if retry_after is not None:
+                    try:
+                        return float(retry_after)
+                    except (ValueError, TypeError):
+                        pass
+        return self._exp_jitter(retry_state)
 
 
 class APIDeploymentsClient:
@@ -61,6 +106,7 @@ class APIDeploymentsClient:
         initial_delay: float = 2.0,
         max_delay: float = 60.0,
         backoff_factor: float = 2.0,
+        jitter: float = 1.0,
     ):
         """Initializes the APIClient class.
 
@@ -72,6 +118,7 @@ class APIDeploymentsClient:
             initial_delay (float): Initial delay in seconds before the first retry.
             max_delay (float): Maximum delay in seconds between retries.
             backoff_factor (float): Multiplier applied to delay for each retry.
+            jitter (float): Maximum additive jitter in seconds added to each delay.
         """
         if logging_level == "":
             logging_level = os.getenv("UNSTRACT_API_CLIENT_LOGGING_LEVEL", "INFO")
@@ -102,6 +149,7 @@ class APIDeploymentsClient:
         self.initial_delay = initial_delay
         self.max_delay = max_delay
         self.backoff_factor = backoff_factor
+        self.jitter = jitter
 
     def _is_retryable_status(self, status_code: int) -> bool:
         """Checks whether a status code should trigger a retry.
@@ -124,37 +172,6 @@ class APIDeploymentsClient:
         self.base_url = parsed_url.scheme + "://" + parsed_url.netloc
         self.logger.debug("Base URL: " + self.base_url)
 
-    def _calculate_delay(self, attempt: int) -> float:
-        """Calculates the delay before the next retry using exponential backoff
-        with full jitter.
-
-        Args:
-            attempt (int): The current retry attempt number (0-indexed).
-
-        Returns:
-            float: The delay in seconds.
-        """
-        exp_delay = min(
-            self.initial_delay * (self.backoff_factor**attempt), self.max_delay
-        )
-        # Full jitter: randomize between 0 and exp_delay to avoid thundering herd
-        return random.uniform(0, exp_delay)
-
-    def _get_retry_delay(self, response, attempt: int) -> float:
-        """Returns the delay before the next retry.
-
-        For 429 responses, respects the Retry-After header if present.
-        Otherwise falls back to exponential backoff with jitter.
-        """
-        if response is not None and response.status_code == 429:
-            retry_after = response.headers.get("Retry-After")
-            if retry_after is not None:
-                try:
-                    return float(retry_after)
-                except (ValueError, TypeError):
-                    pass
-        return self._calculate_delay(attempt)
-
     @staticmethod
     def _rewind_files(files):
         """Rewinds file objects so they can be re-sent on retry."""
@@ -169,6 +186,8 @@ class APIDeploymentsClient:
     def _request_with_retry(self, method: str, url: str, **kwargs) -> requests.Response:
         """Makes an HTTP request with exponential backoff retry logic.
 
+        Uses ``tenacity`` with additive jitter and Retry-After support.
+
         Args:
             method (str): The HTTP method (e.g., "GET", "POST").
             url (str): The request URL.
@@ -181,67 +200,81 @@ class APIDeploymentsClient:
             ConnectionError: If a connection error persists after all retries.
             Timeout: If a timeout persists after all retries.
         """
-        response = None
+        files = kwargs.get("files")
 
-        for attempt in range(self.max_retries + 1):
-            # Rewind file objects for retry attempts
-            if attempt > 0:
-                files = kwargs.get("files")
-                if files:
-                    self._rewind_files(files)
+        def _before_sleep(retry_state: RetryCallState):
+            attempt = retry_state.attempt_number
+            delay = retry_state.next_action.sleep
+            outcome = retry_state.outcome
+            if outcome.failed:
+                exc = outcome.exception()
+                self.logger.warning(
+                    "%s during request to %s. Retrying in %.1fs "
+                    "(attempt %d/%d).",
+                    type(exc).__name__,
+                    url,
+                    delay,
+                    attempt,
+                    self.max_retries,
+                )
+            else:
+                response = outcome.result()
+                self.logger.warning(
+                    "Request to %s returned %d. Retrying in %.1fs "
+                    "(attempt %d/%d).",
+                    url,
+                    response.status_code,
+                    delay,
+                    attempt,
+                    self.max_retries,
+                )
+            # Rewind file objects before next attempt
+            if files:
+                self._rewind_files(files)
 
-            try:
-                response = requests.request(method, url, **kwargs)
+        def _retry_error_callback(retry_state: RetryCallState):
+            outcome = retry_state.outcome
+            if outcome.failed:
+                exc = outcome.exception()
+                self.logger.warning(
+                    "%s during request to %s. Retries exhausted (%d/%d).",
+                    type(exc).__name__,
+                    url,
+                    self.max_retries,
+                    self.max_retries,
+                )
+                raise exc
+            response = outcome.result()
+            self.logger.warning(
+                "Request to %s returned %d. Retries exhausted (%d/%d).",
+                url,
+                response.status_code,
+                self.max_retries,
+                self.max_retries,
+            )
+            return response
 
-                if not self._is_retryable_status(response.status_code):
-                    return response
+        retrier = Retrying(
+            stop=stop_after_attempt(self.max_retries + 1),
+            wait=_WaitRetryAfterOrExponentialJitter(
+                initial=self.initial_delay,
+                max=self.max_delay,
+                exp_base=self.backoff_factor,
+                jitter=self.jitter,
+            ),
+            retry=(
+                retry_if_result(
+                    lambda r: self._is_retryable_status(r.status_code)
+                )
+                | retry_if_exception_type((ConnectionError, Timeout))
+            ),
+            before_sleep=_before_sleep,
+            retry_error_callback=_retry_error_callback,
+            sleep=time.sleep,
+            reraise=False,
+        )
 
-                if attempt < self.max_retries:
-                    delay = self._get_retry_delay(response, attempt)
-                    self.logger.warning(
-                        "Request to %s returned %d. Retrying in %.1fs "
-                        "(attempt %d/%d).",
-                        url,
-                        response.status_code,
-                        delay,
-                        attempt + 1,
-                        self.max_retries,
-                    )
-                    time.sleep(delay)
-                else:
-                    self.logger.warning(
-                        "Request to %s returned %d. Retries exhausted (%d/%d).",
-                        url,
-                        response.status_code,
-                        self.max_retries,
-                        self.max_retries,
-                    )
-
-            except (ConnectionError, Timeout) as exc:
-                response = None
-                if attempt < self.max_retries:
-                    delay = self._get_retry_delay(None, attempt)
-                    self.logger.warning(
-                        "%s during request to %s. Retrying in %.1fs "
-                        "(attempt %d/%d).",
-                        type(exc).__name__,
-                        url,
-                        delay,
-                        attempt + 1,
-                        self.max_retries,
-                    )
-                    time.sleep(delay)
-                else:
-                    self.logger.warning(
-                        "%s during request to %s. Retries exhausted (%d/%d).",
-                        type(exc).__name__,
-                        url,
-                        self.max_retries,
-                        self.max_retries,
-                    )
-                    raise
-
-        return response
+        return retrier(requests.request, method, url, **kwargs)
 
     def structure_file(self, file_paths: list[str]) -> dict:
         """Invokes the API deployed on the Unstract platform.

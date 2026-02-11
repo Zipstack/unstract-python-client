@@ -357,15 +357,19 @@ class APIDeploymentsClient:
         }
 
         # Check if the status is pending or if it's successful but lacks a result.
-        # Per the Unstract Status API migration guide (Option 1), we determine
-        # pending state from the response body alone, ignoring the HTTP status
-        # code — the server currently returns 422 for PENDING/EXECUTING.
-        if execution_status in self.in_progress_statuses or (
-            execution_status == "SUCCESS" and not extraction_result
-        ):
-            obj_to_return.update(
-                {"status_check_api_endpoint": status_api_endpoint, "pending": True}
-            )
+        # The POST endpoint returns 200 for successful queuing (including
+        # PENDING/EXECUTING) and 422 only on setup errors — guard against
+        # incorrectly polling after an error response.
+        if 200 <= response.status_code < 300:
+            if execution_status in self.in_progress_statuses or (
+                execution_status == "SUCCESS" and not extraction_result
+            ):
+                obj_to_return.update(
+                    {
+                        "status_check_api_endpoint": status_api_endpoint,
+                        "pending": True,
+                    }
+                )
 
         return obj_to_return
 

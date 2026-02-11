@@ -331,7 +331,9 @@ class TestTimeoutPassed:
     @patch("unstract.api_deployments.client.requests.request")
     def test_no_default_timeout_set(self, mock_request, client):
         """api_timeout is a server-side parameter, not an HTTP socket timeout.
-        _request_with_retry should NOT inject a default timeout kwarg."""
+
+        _request_with_retry should NOT inject a default timeout kwarg.
+        """
         mock_request.return_value = _mock_response(200)
         client._request_with_retry("GET", "https://api.example.com/test")
         _, kwargs = mock_request.call_args
@@ -476,7 +478,8 @@ class TestCheckExecutionStatusPendingFix:
 
     @patch("unstract.api_deployments.client.requests.request")
     def test_422_with_pending_status_sets_pending_true(self, mock_request, client):
-        """HTTP 422 with PENDING body status — still detected via body check."""
+        """HTTP 422 with PENDING body status — still detected via body
+        check."""
         mock_request.return_value = _mock_response(
             422, json_data={"status": "PENDING", "error": "", "message": ""}
         )
@@ -591,12 +594,20 @@ class TestStructureFileNoRetryInSyncMode:
         assert mock_post.call_count == 1
 
 
-# ── structure_file: 422 + PENDING sets pending=True ──
+# ── structure_file: POST 422 does NOT set pending ──
+# The POST endpoint returns 200 for successful queuing (PENDING/EXECUTING)
+# and 422 only on setup errors. A 422 should never trigger polling.
 
 
-class TestStructureFilePendingOn422:
+class TestStructureFile422DoesNotSetPending:
     @patch("unstract.api_deployments.client.requests.post")
-    def test_422_pending_sets_pending_true(self, mock_post, tmp_path):
+    def test_422_pending_does_not_set_pending(self, mock_post, tmp_path):
+        """POST 422 with PENDING status should NOT set pending=True.
+
+        The POST endpoint returns 422 only on setup errors, so the
+        client must not start polling even if execution_status says
+        PENDING.
+        """
         test_file = tmp_path / "test.pdf"
         test_file.write_bytes(b"fake pdf content")
 
@@ -618,12 +629,16 @@ class TestStructureFilePendingOn422:
             },
         )
         result = c.structure_file([str(test_file)])
-        assert result["pending"] is True
-        assert result["status_check_api_endpoint"] == "/api/status/abc"
+        assert result["pending"] is False
         assert result["status_code"] == 422
 
     @patch("unstract.api_deployments.client.requests.post")
-    def test_422_executing_sets_pending_true(self, mock_post, tmp_path):
+    def test_422_executing_does_not_set_pending(self, mock_post, tmp_path):
+        """POST 422 with EXECUTING status should NOT set pending=True.
+
+        Same rationale as above — 422 from POST means a setup error, not
+        a legitimately queued execution.
+        """
         test_file = tmp_path / "test.pdf"
         test_file.write_bytes(b"fake pdf content")
 
@@ -645,12 +660,12 @@ class TestStructureFilePendingOn422:
             },
         )
         result = c.structure_file([str(test_file)])
-        assert result["pending"] is True
+        assert result["pending"] is False
         assert result["status_code"] == 422
 
     @patch("unstract.api_deployments.client.requests.post")
-    def test_200_pending_still_works(self, mock_post, tmp_path):
-        """Existing behaviour: 200 + PENDING also sets pending=True."""
+    def test_200_pending_sets_pending_true(self, mock_post, tmp_path):
+        """POST 200 + PENDING correctly sets pending=True for polling."""
         test_file = tmp_path / "test.pdf"
         test_file.write_bytes(b"fake pdf content")
 

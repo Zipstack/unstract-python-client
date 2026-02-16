@@ -25,7 +25,22 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
-[tool.pdm.dev-dependencies]
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/unstract/api_deployments/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/unstract"]
+
+[dependency-groups]
+dev = [
+    "python-dotenv>=1.0.0",
+    {include-group = "test"},
+    {include-group = "lint"},
+]
 test = [
     "pytest>=8.2.2",
     "pytest-mock>=3.14.0",
@@ -43,12 +58,8 @@ lint = [
     "isort~=5.12.0",
     "pre-commit~=3.3.1",
     "yamllint>=1.35.1",
-    "mypy~=1.10.0"
+    "mypy~=1.10.0",
 ]
-
-[tool.pdm.version]
-source = "file"
-path = "src/unstract/api_deployments/__init__.py"
 
 [tool.isort]
 line_length = 88
@@ -62,26 +73,8 @@ profile = "black"
 [tool.flake8]
 max-line-length = 88
 
-[tool.pdm.build]
-includes = ["src"]
-package-dir = "src"
-
 [tool.pytest.ini_options]
 env_files = ["tests/.env"]
 addopts = "-s"
 log_level = "INFO"
 log_cli = true
-
-[tool.pdm.scripts]
-test.cmd = "pytest -s -v"
-test.env_file = "tests/.env"
-test.help = "Runs pytests for Unstract client"
-
-[build-system]
-requires = ["pdm-backend"]
-build-backend = "pdm.backend"
-
-[dependency-groups]
-dev = [
-    "python-dotenv>=1.0.0",
-]

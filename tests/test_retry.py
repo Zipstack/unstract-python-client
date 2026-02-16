@@ -108,16 +108,16 @@ class TestIsRetryableStatus:
     def test_default_retries_any_5xx(self, client):
         """Any 5xx status code should be retried by default."""
         for code in (500, 501, 502, 503, 504, 507, 511, 599):
-            assert (
-                client._is_retryable_status(code) is True
-            ), f"Expected {code} retryable"
+            assert client._is_retryable_status(code) is True, (
+                f"Expected {code} retryable"
+            )
 
     def test_default_no_retry_4xx_except_429(self, client):
         """4xx codes (except 429) should not be retried by default."""
         for code in (400, 401, 403, 404, 405, 408, 422):
-            assert (
-                client._is_retryable_status(code) is False
-            ), f"Expected {code} not retryable"
+            assert client._is_retryable_status(code) is False, (
+                f"Expected {code} not retryable"
+            )
 
     def test_default_no_retry_2xx(self, client):
         assert client._is_retryable_status(200) is False
@@ -203,9 +203,7 @@ class TestWaitStrategy:
         wait = _WaitRetryAfterOrExponentialJitter(
             initial=2.0, max=60.0, exp_base=2.0, jitter=1.0
         )
-        rs = self._make_retry_state(
-            attempt_number=1, exception=ConnectionError("fail")
-        )
+        rs = self._make_retry_state(attempt_number=1, exception=ConnectionError("fail"))
         delay = wait(rs)
         assert 2.0 <= delay <= 3.0
 

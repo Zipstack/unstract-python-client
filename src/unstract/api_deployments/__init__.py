@@ -1,6 +1,6 @@
 __version__ = "1.1.0"
 
-from .client import APIDeploymentsClient
+from .client import APIDeploymentsClient as APIDeploymentsClient
 
 
 def get_sdk_version():

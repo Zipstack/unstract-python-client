@@ -66,10 +66,7 @@ class _WaitRetryAfterOrExponentialJitter(wait_base):
         outcome = retry_state.outcome
         if outcome and not outcome.failed:
             response = outcome.result()
-            if (
-                response is not None
-                and getattr(response, "status_code", None) == 429
-            ):
+            if response is not None and getattr(response, "status_code", None) == 429:
                 retry_after = response.headers.get("Retry-After")
                 if retry_after is not None:
                     try:
@@ -209,8 +206,7 @@ class APIDeploymentsClient:
             if outcome.failed:
                 exc = outcome.exception()
                 self.logger.warning(
-                    "%s during request to %s. Retrying in %.1fs "
-                    "(attempt %d/%d).",
+                    "%s during request to %s. Retrying in %.1fs (attempt %d/%d).",
                     type(exc).__name__,
                     url,
                     delay,
@@ -220,8 +216,7 @@ class APIDeploymentsClient:
             else:
                 response = outcome.result()
                 self.logger.warning(
-                    "Request to %s returned %d. Retrying in %.1fs "
-                    "(attempt %d/%d).",
+                    "Request to %s returned %d. Retrying in %.1fs (attempt %d/%d).",
                     url,
                     response.status_code,
                     delay,
@@ -263,9 +258,7 @@ class APIDeploymentsClient:
                 jitter=self.jitter,
             ),
             retry=(
-                retry_if_result(
-                    lambda r: self._is_retryable_status(r.status_code)
-                )
+                retry_if_result(lambda r: self._is_retryable_status(r.status_code))
                 | retry_if_exception_type((ConnectionError, Timeout))
             ),
             before_sleep=_before_sleep,

@@ -17,11 +17,14 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name }}
 
-      - name: Setup PDM
-        uses: pdm-project/setup-pdm@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
         with:
-          python-version: 3.11
-          version: 2.10.0
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Build package
+        run: uv build
 
       - name: Publish package distributions to PyPI
-        run: pdm publish
+        run: uv publish

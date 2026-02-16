@@ -5,7 +5,7 @@ class UnstractUtils:
 
         Args:
             api_key (str): API key to redact
-            reveal_length (int): Number of characters to reveal from the start of the key
+            reveal_length (int): Number of characters to reveal from the start
 
         Returns:
             str: Redacted API key

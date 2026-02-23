@@ -1,30 +1,177 @@
-name: Publish Python Package
+name: Release Tag and Publish Package
 
 on:
-  release:
-    types:
-        - published
+  # Manual trigger with version bump input
+  workflow_dispatch:
+    inputs:
+      version_bump:
+        description: "Version bump type"
+        required: true
+        default: "patch"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      pre_release:
+        description: "Create as pre-release"
+        required: false
+        default: false
+        type: boolean
+      release_notes:
+        description: "Release notes (optional)"
+        required: false
+        type: string
 
 jobs:
-  pypi-publish:
-    name: upload release to PyPI
+  release-and-publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write
     steps:
+      - name: Generate GitHub App Token
+        id: generate-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.PUSH_TO_MAIN_APP_ID }}
+          private-key: ${{ secrets.PUSH_TO_MAIN_APP_PRIVATE_KEY }}
+          owner: Zipstack
+          repositories: |
+            unstract-python-client
+
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          token: ${{ steps.generate-token.outputs.token }}
+          fetch-depth: 0
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
+      # Configure git for commits
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      # Setup Python
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      # Install uv
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.6.14"
           enable-cache: true
 
+      # Install dependencies
+      - name: Install dependencies
+        run: uv sync --dev
+
+      # Handle workflow_dispatch (manual trigger)
+      - name: Bump version and create release
+        if: github.event_name == 'workflow_dispatch'
+        id: create_release
+        run: |
+          # Get current version from __init__.py using grep/sed (avoid importing)
+          CURRENT_VERSION=$(grep -E "^__version__ = " src/unstract/api_deployments/__init__.py | sed -E 's/__version__ = "(.*)"/\1/')
+          echo "Current version: $CURRENT_VERSION"
+
+          # Calculate new version based on input
+          IFS='.' read -ra VERSION_PARTS <<< "$CURRENT_VERSION"
+          MAJOR=${VERSION_PARTS[0]}
+          MINOR=${VERSION_PARTS[1]}
+          PATCH=${VERSION_PARTS[2]}
+
+          case "${{ github.event.inputs.version_bump }}" in
+            "major")
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            "minor")
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            "patch")
+              PATCH=$((PATCH + 1))
+              ;;
+          esac
+
+          NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+          echo "New version: $NEW_VERSION"
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+          # Update version in __init__.py
+          sed -i "s/__version__ = \"$CURRENT_VERSION\"/__version__ = \"$NEW_VERSION\"/" src/unstract/api_deployments/__init__.py
+
+          # Commit version changes
+          git add src/unstract/api_deployments/__init__.py
+          git commit -m "chore: bump version to $NEW_VERSION [skip ci]"
+          git push origin main
+
+          # Create git tag
+          git tag "v$NEW_VERSION"
+          git push origin "v$NEW_VERSION"
+
+          # Create GitHub release
+          RELEASE_NOTES="${{ github.event.inputs.release_notes }}"
+          if [ -z "$RELEASE_NOTES" ]; then
+            gh release create "v$NEW_VERSION" \
+              --title "Release v$NEW_VERSION" \
+              --generate-notes \
+              ${{ github.event.inputs.pre_release == 'true' && '--prerelease' || '' }}
+          else
+            gh release create "v$NEW_VERSION" \
+              --title "Release v$NEW_VERSION" \
+              --notes "$RELEASE_NOTES" \
+              --generate-notes \
+              ${{ github.event.inputs.pre_release == 'true' && '--prerelease' || '' }}
+          fi
+
+          echo "Created release v$NEW_VERSION"
+        env:
+          GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
+
+      # Set version for subsequent steps
+      - name: Set version output
+        id: version
+        run: |
+          echo "version=${{ steps.create_release.outputs.version }}" >> $GITHUB_OUTPUT
+
+      # Verify the version was updated correctly
+      - name: Verify version update
+        run: |
+          PACKAGE_VERSION=$(grep -E "^__version__ = " src/unstract/api_deployments/__init__.py | sed -E 's/__version__ = "(.*)"/\1/')
+          echo "Package version: $PACKAGE_VERSION"
+          echo "Target version: ${{ steps.version.outputs.version }}"
+          if [ "$PACKAGE_VERSION" != "${{ steps.version.outputs.version }}" ]; then
+            echo "Version mismatch! Exiting..."
+            exit 1
+          fi
+
+      # Create test environment
+      - name: Create test env
+        run: cp tests/sample.env tests/.env
+
+      # Run linting
+      - name: Run linting
+        run: uv run ruff check src/
+
+      # Run tests
+      - name: Run tests
+        run: uv run pytest tests/
+
+      # Build the package
       - name: Build package
         run: uv build
 
-      - name: Publish package distributions to PyPI
+      # Publish to PyPI using Trusted Publishers
+      - name: Publish to PyPI
         run: uv publish
+
+      # Output success message
+      - name: Success message
+        run: |
+          echo "Successfully published version ${{ steps.version.outputs.version }} to PyPI using uv publish with Trusted Publishers"
+          echo "Release: https://github.com/${{ github.repository }}/releases/tag/v${{ steps.version.outputs.version }}"
+          echo "PyPI: https://pypi.org/project/unstract-client/${{ steps.version.outputs.version }}/"

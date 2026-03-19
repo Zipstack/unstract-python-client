@@ -31,7 +31,6 @@ Typical usage for promoting a project from dev to prod::
     result = target.sync_prompts("<target_tool_id>", export_data)
 """
 
-import io
 import json
 import logging
 import os
@@ -89,7 +88,8 @@ class PromptStudioClient:
     ) -> requests.Response:
         """Make an authenticated request and raise on HTTP errors."""
         url = self._url(path)
-        kwargs.setdefault("headers", {}).update(self._headers)
+        merged_headers = {**kwargs.pop("headers", {}), **self._headers}
+        kwargs["headers"] = merged_headers
         kwargs.setdefault("timeout", self.timeout)
         kwargs.setdefault("verify", self.verify)
 
@@ -175,26 +175,27 @@ class PromptStudioClient:
             Import result dict with ``tool_id``, ``message``,
             ``needs_adapter_config``, and optional ``warning``.
         """
-        # Resolve export_data to a file-like object
+        # Resolve export_data to bytes for the multipart upload.
+        # Read eagerly to avoid file handle leaks.
         if isinstance(export_data, (str, Path)) and Path(export_data).is_file():
-            file_obj = open(export_data, "rb")
+            with open(export_data, "rb") as f:
+                content = f.read()
             filename = Path(export_data).name
         elif isinstance(export_data, dict):
             content = json.dumps(export_data).encode()
-            file_obj = io.BytesIO(content)
             tool_name = (
                 export_data.get("tool_metadata", {}).get("tool_name", "export")
             )
             filename = f"{tool_name}.json"
         elif isinstance(export_data, str):
-            file_obj = io.BytesIO(export_data.encode())
+            content = export_data.encode()
             filename = "export.json"
         else:
             raise PromptStudioClientError(
                 "export_data must be a dict, JSON string, or file path"
             )
 
-        files = {"file": (filename, file_obj, "application/json")}
+        files = {"file": (filename, content, "application/json")}
         data = {}
         if adapters:
             for key in (
@@ -268,7 +269,8 @@ class PromptStudioClient:
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        files = {"file": (file_path.name, open(file_path, "rb"))}
+        with open(file_path, "rb") as f:
+            files = {"file": (file_path.name, f.read())}
         resp = self._request(
             "POST", f"prompt-studio/file/{tool_id}", files=files
         )
@@ -296,6 +298,7 @@ class PromptStudioClient:
         chunk_overlap: int = 100,
         retrieval_strategy: str = "simple",
         similarity_top_k: int = 3,
+        is_default: bool = True,
     ) -> dict:
         """Create a profile for a Prompt Studio project.
 
@@ -314,6 +317,7 @@ class PromptStudioClient:
             chunk_overlap: Chunk overlap for indexing.
             retrieval_strategy: Retrieval strategy (simple, subquestion, etc.).
             similarity_top_k: Number of top embeddings for context.
+            is_default: Whether this profile should be the default.
 
         Returns:
             Created profile dict.
@@ -351,7 +355,7 @@ class PromptStudioClient:
             "chunk_overlap": chunk_overlap,
             "retrieval_strategy": retrieval_strategy,
             "similarity_top_k": similarity_top_k,
-            "is_default": True,
+            "is_default": is_default,
         }
         resp = self._request(
             "POST", f"prompt-studio/profilemanager/{tool_id}", json=payload

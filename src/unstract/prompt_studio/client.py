@@ -88,7 +88,7 @@ class PromptStudioClient:
     ) -> requests.Response:
         """Make an authenticated request and raise on HTTP errors."""
         url = self._url(path)
-        merged_headers = {**kwargs.pop("headers", {}), **self._headers}
+        merged_headers = {**self._headers, **kwargs.pop("headers", {})}
         kwargs["headers"] = merged_headers
         kwargs.setdefault("timeout", self.timeout)
         kwargs.setdefault("verify", self.verify)
@@ -177,7 +177,13 @@ class PromptStudioClient:
         """
         # Resolve export_data to bytes for the multipart upload.
         # Read eagerly to avoid file handle leaks.
-        if isinstance(export_data, (str, Path)) and Path(export_data).is_file():
+        if isinstance(export_data, Path):
+            if not export_data.is_file():
+                raise FileNotFoundError(f"Export file not found: {export_data}")
+            with open(export_data, "rb") as f:
+                content = f.read()
+            filename = export_data.name
+        elif isinstance(export_data, str) and Path(export_data).is_file():
             with open(export_data, "rb") as f:
                 content = f.read()
             filename = Path(export_data).name

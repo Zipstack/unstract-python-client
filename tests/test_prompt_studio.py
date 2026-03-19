@@ -242,42 +242,6 @@ class TestExportTool:
 
 class TestPromote:
     @patch("unstract.prompt_studio.client.requests.request")
-    def test_promote_import(self, mock_request):
-        source = PromptStudioClient(
-            base_url="https://dev.unstract.com",
-            api_key="source-key",
-            org_id="org_dev",
-        )
-        target = PromptStudioClient(
-            base_url="https://prod.unstract.com",
-            api_key="target-key",
-            org_id="org_prod",
-        )
-
-        export_resp = MagicMock()
-        export_resp.ok = True
-        export_resp.json.return_value = MOCK_EXPORT_DATA
-
-        import_resp = MagicMock()
-        import_resp.ok = True
-        import_resp.json.return_value = {
-            "tool_id": "new-prod-id",
-            "message": "Imported",
-        }
-
-        mock_request.side_effect = [export_resp, import_resp]
-
-        result = source.promote(
-            MOCK_TOOL_ID,
-            target,
-            adapters={"llm_adapter_id": 99},
-        )
-
-        assert result["strategy"] == "import"
-        assert result["tool_id"] == "new-prod-id"
-        assert mock_request.call_count == 2
-
-    @patch("unstract.prompt_studio.client.requests.request")
     def test_promote_sync(self, mock_request):
         source = PromptStudioClient(
             base_url="https://dev.unstract.com",
@@ -310,9 +274,9 @@ class TestPromote:
             create_copy=True,
         )
 
-        assert result["strategy"] == "sync"
         assert result["tool_id"] == "existing-prod-tool"
         assert result["prompts_created"] == 2
+        assert mock_request.call_count == 2
 
     @patch("unstract.prompt_studio.client.requests.request")
     def test_promote_with_export(self, mock_request):
@@ -351,7 +315,6 @@ class TestPromote:
             export=True,
         )
 
-        assert result["strategy"] == "sync"
         assert result["export_result"]["status"] == "exported"
         assert mock_request.call_count == 3
         # Verify the export call used force_export

@@ -385,50 +385,42 @@ class PromptStudioClient:
         self,
         tool_id: str,
         target: "PromptStudioClient",
-        target_tool_id: str | None = None,
-        adapters: dict | None = None,
+        target_tool_id: str,
         create_copy: bool = True,
         export: bool = False,
     ) -> dict:
         """Promote a project from this environment to a target environment.
 
-        Orchestrates the full promotion flow:
+        Syncs prompts from a source project into an existing target project.
+        The target project must already exist with a default profile
+        configured (use ``import_project`` + ``create_profile`` for
+        one-time setup).
+
+        Orchestrates the promotion flow:
 
         1. **Export** the project from this (source) environment.
-        2. **Import or sync** on the target environment:
-           - If ``target_tool_id`` is ``None``: imports as a new project.
-           - If ``target_tool_id`` is provided: syncs prompts into the
-             existing project (rip-and-replace).
+        2. **Sync** prompts into the target project (rip-and-replace).
         3. **Export for deployment** (optional): if ``export=True``, runs
            a force export on the target to update the tool registry.
 
         Args:
             tool_id: UUID of the source project to promote.
             target: A ``PromptStudioClient`` connected to the target env.
-            target_tool_id: If provided, sync into this existing project.
-                If ``None``, import as a new project.
-            adapters: Adapter IDs for the target environment (only used
-                for fresh import, ignored for sync)::
-
-                    {
-                        "llm_adapter_id": 42,
-                        "vector_db_adapter_id": 7,
-                        "embedding_adapter_id": 15,
-                        "x2text_adapter_id": 3,
-                    }
-
+            target_tool_id: UUID of the existing target project to sync into.
             create_copy: If ``True`` (default), creates a backup clone
-                on the target before syncing. Only applies to sync strategy.
+                on the target before syncing.
             export: If ``True``, export the tool for deployment on the
-                target after import/sync. Always uses force export.
+                target after syncing. Always uses force export.
 
         Returns:
             Dict with promotion result::
 
                 {
-                    "strategy": "import" | "sync",
                     "tool_id": "UUID of the target project",
-                    # ... additional fields from import/sync response
+                    "prompts_created": N,
+                    "prompts_deleted": N,
+                    "tool_settings_updated": true,
+                    "backup_tool_id": "...",  # only if create_copy=True
                     "export_result": { ... }  # only if export=True
                 }
         """
@@ -441,39 +433,27 @@ class PromptStudioClient:
             "Exported '%s' with %d prompts", tool_name, prompt_count
         )
 
-        # Step 2: Import or sync on target
-        if target_tool_id:
-            logger.info(
-                "Syncing prompts into %s on %s (backup=%s)",
-                target_tool_id,
-                target.base_url,
-                create_copy,
-            )
-            result = target.sync_prompts(
-                target_tool_id, export_data, create_copy=create_copy
-            )
-            result["strategy"] = "sync"
-            result["tool_id"] = target_tool_id
-        else:
-            logger.info("Importing as new project on %s", target.base_url)
-            result = target.import_project(export_data, adapters=adapters)
-            result["strategy"] = "import"
+        # Step 2: Sync prompts into target
+        logger.info(
+            "Syncing prompts into %s on %s (backup=%s)",
+            target_tool_id,
+            target.base_url,
+            create_copy,
+        )
+        result = target.sync_prompts(
+            target_tool_id, export_data, create_copy=create_copy
+        )
+        result["tool_id"] = target_tool_id
 
         logger.info("Promotion complete: %s", result.get("message", ""))
 
         # Step 3: Optionally export for deployment
         if export:
-            resolved_tool_id = result.get("tool_id")
-            if resolved_tool_id:
-                logger.info(
-                    "Exporting tool %s for deployment on %s",
-                    resolved_tool_id,
-                    target.base_url,
-                )
-                result["export_result"] = target.export_tool(resolved_tool_id)
-            else:
-                logger.warning(
-                    "Cannot export tool — no tool_id in promotion result"
-                )
+            logger.info(
+                "Exporting tool %s for deployment on %s",
+                target_tool_id,
+                target.base_url,
+            )
+            result["export_result"] = target.export_tool(target_tool_id)
 
         return result

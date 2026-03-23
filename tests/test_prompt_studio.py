@@ -312,7 +312,7 @@ class TestPromote:
             MOCK_TOOL_ID,
             target,
             target_tool_id="existing-prod-tool",
-            export=True,
+            export_as_tool=True,
         )
 
         assert result["export_result"]["status"] == "exported"

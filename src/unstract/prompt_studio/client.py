@@ -397,7 +397,7 @@ class PromptStudioClient:
         target: "PromptStudioClient",
         target_tool_id: str,
         create_copy: bool = True,
-        export: bool = False,
+        export_as_tool: bool = False,
     ) -> dict:
         """Promote a project from this environment to a target environment.
 
@@ -410,7 +410,7 @@ class PromptStudioClient:
 
         1. **Export** the project from this (source) environment.
         2. **Sync** prompts into the target project (rip-and-replace).
-        3. **Export for deployment** (optional): if ``export=True``, runs
+        3. **Export as tool** (optional): if ``export_as_tool=True``, runs
            a force export on the target to update the tool registry.
 
         Args:
@@ -419,8 +419,8 @@ class PromptStudioClient:
             target_tool_id: UUID of the existing target project to sync into.
             create_copy: If ``True`` (default), creates a backup clone
                 on the target before syncing.
-            export: If ``True``, export the tool for deployment on the
-                target after syncing. Always uses force export.
+            export_as_tool: If ``True``, export the tool for deployment on
+                the target after syncing. Always uses force export.
 
         Returns:
             Dict with promotion result::
@@ -431,7 +431,7 @@ class PromptStudioClient:
                     "prompts_deleted": N,
                     "tool_settings_updated": true,
                     "backup_tool_id": "...",  # only if create_copy=True
-                    "export_result": { ... }  # only if export=True
+                    "export_result": { ... }  # only if export_as_tool=True
                 }
         """
         # Step 1: Export from source
@@ -458,7 +458,7 @@ class PromptStudioClient:
         logger.info("Promotion complete: %s", result.get("message", ""))
 
         # Step 3: Optionally export for deployment
-        if export:
+        if export_as_tool:
             logger.info(
                 "Exporting tool %s for deployment on %s",
                 target_tool_id,

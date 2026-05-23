@@ -25,6 +25,15 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
+[project.optional-dependencies]
+migration = [
+    "click>=8.1",
+    "rich>=13.7",
+]
+
+[project.scripts]
+unstract-migrate = "unstract.migration.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

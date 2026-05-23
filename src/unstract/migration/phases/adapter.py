@@ -20,17 +20,7 @@ from unstract.migration.report import MigrationReport, PhaseResult
 
 logger = logging.getLogger(__name__)
 
-# Fields copied verbatim from source GET into target POST. Everything else
-# (id, created_by, deprecation flags, icon, etc.) is either auto-set by the
-# target backend or derived — carrying it would either be ignored or cause
-# validation noise.
-ADAPTER_POST_FIELDS = (
-    "adapter_id",
-    "adapter_name",
-    "adapter_type",
-    "adapter_metadata",
-    "description",
-)
+ADAPTER_PATH = "adapter/"
 
 
 class AdapterPhase(Phase):
@@ -38,6 +28,13 @@ class AdapterPhase(Phase):
 
     def run(self, report: MigrationReport) -> PhaseResult:
         result = report.get_phase(self.name)
+        try:
+            self._writable = self.ctx.target.get_post_schema(ADAPTER_PATH)
+        except Exception as e:
+            logger.exception("Failed to fetch target POST schema for adapter: %s", e)
+            result.failed += 1
+            result.errors.append(f"OPTIONS adapter: {e}")
+            return result
         try:
             src_summaries = self.ctx.source.list_adapters()
         except Exception as e:
@@ -88,7 +85,7 @@ class AdapterPhase(Phase):
             logger.info("[dry-run] would create adapter '%s' [%s] src=%s", name, atype, src_id)
             return
         else:
-            payload = {k: src[k] for k in ADAPTER_POST_FIELDS if k in src and src[k] is not None}
+            payload = {k: src[k] for k in self._writable if k in src and src[k] is not None}
             try:
                 tgt = self.ctx.target.create_adapter(payload)
             except Exception as e:

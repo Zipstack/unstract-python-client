@@ -15,18 +15,30 @@ from unstract.migration.context import (
     RemapTable,
 )
 from unstract.migration.exceptions import NameConflictError
-from unstract.migration.phases.connector import (
-    UCS_CONNECTOR_ID,
-    ConnectorPhase,
-)
+from unstract.migration.phases.connector import ConnectorPhase
 from unstract.migration.report import MigrationReport
 
 
 class FakeClient:
+    POST_SCHEMA = frozenset(
+        {
+            "connector_id",
+            "connector_name",
+            "connector_metadata",
+            "connector_version",
+            "connector_mode",
+            "connector_type",
+            "shared_to_org",
+        }
+    )
+
     def __init__(self, connectors: list[dict] | None = None):
         self.connectors: list[dict] = list(connectors or [])
         self.posts: list[dict] = []
         self._next_id = 1
+
+    def get_post_schema(self, entity_path):
+        return self.POST_SCHEMA
 
     def list_connectors(self, *, name=None, connector_type=None):
         result = self.connectors
@@ -88,9 +100,12 @@ def test_happy_path_creates_all_and_records_remap():
     assert ctx.remap.resolve("connector", "src-b") == tgt.posts[1]["id"]
 
 
-def test_ucs_connector_skipped_without_target_lookup():
-    """UCS rows must be skipped pre-flight — no POST, no remap entry."""
-    src = FakeClient([_src("src-ucs", "User Storage", catalog_id=UCS_CONNECTOR_ID)])
+def test_redacted_metadata_connector_skipped():
+    """Source returning empty metadata (redacted by backend) is unmigratable —
+    skipped with no POST and no remap entry."""
+    redacted = _src("src-ucs", "User Storage")
+    redacted["connector_metadata"] = {}  # backend redaction signal
+    src = FakeClient([redacted])
     tgt = FakeClient()
     ctx = _ctx(src, tgt)
     report = MigrationReport()

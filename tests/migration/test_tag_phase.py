@@ -19,10 +19,15 @@ from unstract.migration.report import MigrationReport
 
 
 class FakeClient:
+    POST_SCHEMA = frozenset({"name", "description"})
+
     def __init__(self, tags: list[dict] | None = None):
         self.tags: list[dict] = list(tags or [])
         self.posts: list[dict] = []
         self._next_id = 1
+
+    def get_post_schema(self, entity_path):
+        return self.POST_SCHEMA
 
     def list_tags(self, *, name=None):
         result = self.tags

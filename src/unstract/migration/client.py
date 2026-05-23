@@ -37,6 +37,9 @@ class PlatformClient:
                 "Accept": "application/json",
             }
         )
+        # Cache the OPTIONS-derived writable-field set per entity path.
+        # Backend serializer is the single source of truth; we read it once.
+        self._post_schema_cache: dict[str, frozenset[str]] = {}
 
     def _url(self, path: str) -> str:
         base = self.endpoint.base_url.rstrip("/")
@@ -72,6 +75,26 @@ class PlatformClient:
         if resp.status_code == 204 or not resp.content:
             return None
         return resp.json()
+
+    def get_post_schema(self, entity_path: str) -> frozenset[str]:
+        """Return the set of fields the backend's POST serializer accepts.
+
+        Reads it from a DRF ``OPTIONS`` response (``actions.POST``) once
+        per path and caches the result. DRF ``SimpleMetadata`` already
+        excludes ``read_only`` fields from ``actions.POST``, so the
+        returned set is exactly the writable subset.
+        """
+        cached = self._post_schema_cache.get(entity_path)
+        if cached is not None:
+            return cached
+        body = self._request("OPTIONS", entity_path)
+        actions = (body or {}).get("actions") or {}
+        post_block = actions.get("POST") or {}
+        writable = frozenset(
+            name for name, meta in post_block.items() if not meta.get("read_only")
+        )
+        self._post_schema_cache[entity_path] = writable
+        return writable
 
     # ----- adapters -----
 

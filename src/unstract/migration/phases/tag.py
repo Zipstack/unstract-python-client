@@ -19,7 +19,7 @@ from unstract.migration.report import MigrationReport, PhaseResult
 
 logger = logging.getLogger(__name__)
 
-TAG_POST_FIELDS = ("name", "description")
+TAG_PATH = "tags/"
 
 
 class TagPhase(Phase):
@@ -27,6 +27,13 @@ class TagPhase(Phase):
 
     def run(self, report: MigrationReport) -> PhaseResult:
         result = report.get_phase(self.name)
+        try:
+            self._writable = self.ctx.target.get_post_schema(TAG_PATH)
+        except Exception as e:
+            logger.exception("Failed to fetch target POST schema for tag: %s", e)
+            result.failed += 1
+            result.errors.append(f"OPTIONS tag: {e}")
+            return result
         try:
             src_tags = self.ctx.source.list_tags()
         except Exception as e:
@@ -65,7 +72,7 @@ class TagPhase(Phase):
             logger.info("[dry-run] would create tag '%s' src=%s", name, src_id)
             return
         else:
-            payload = {k: src[k] for k in TAG_POST_FIELDS if k in src and src[k] is not None}
+            payload = {k: src[k] for k in self._writable if k in src and src[k] is not None}
             try:
                 tgt = self.ctx.target.create_tag(payload)
             except Exception as e:

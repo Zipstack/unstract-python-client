@@ -24,11 +24,19 @@ from unstract.migration.report import MigrationReport
 class FakeClient:
     """Minimal in-memory stand-in for ``PlatformClient``."""
 
+    # Mirrors DRF OPTIONS actions.POST writable fields for adapter.
+    POST_SCHEMA = frozenset(
+        {"adapter_id", "adapter_name", "adapter_type", "adapter_metadata", "description"}
+    )
+
     def __init__(self, adapters: list[dict] | None = None):
         # Stored as a list of dicts; mutated by create_adapter.
         self.adapters: list[dict] = list(adapters or [])
         self.posts: list[dict] = []
         self._next_id = 1
+
+    def get_post_schema(self, entity_path):
+        return self.POST_SCHEMA
 
     def list_adapters(self, *, name=None, adapter_type=None):
         result = self.adapters

@@ -3,12 +3,13 @@
 Same list -> per-id GET -> POST/adopt pattern as AdapterPhase. Two
 connector-specific wrinkles:
 
-1. **Auto-provisioned UCS connectors are skipped.** The Unstract Cloud
-   Storage connector has its ``connector_metadata`` redacted to ``{}``
-   on the wire, so we cannot reliably reconstruct it on the target.
-   The target org is expected to have its own UCS row already; downstream
-   phases (workflow endpoints) must remap by ``connector_id`` lookup
-   rather than relying on the remap table here.
+1. **Connectors with redacted metadata are skipped.** The backend
+   serializer strips ``connector_metadata`` for auto-provisioned rows
+   (e.g. Unstract Cloud Storage), so the SDK cannot reconstruct them
+   on the target. We detect this by inspecting the source GET response:
+   a falsy ``connector_metadata`` means the operator must rely on the
+   target's own provisioning (or re-create the row manually) — the
+   remap table records no entry for these.
 
 2. **OAuth ``connector_auth`` is stripped from responses.** Tokens are
    stored in a sibling ``ConnectorAuth`` row that the public API never
@@ -27,16 +28,7 @@ from unstract.migration.report import MigrationReport, PhaseResult
 
 logger = logging.getLogger(__name__)
 
-UCS_CONNECTOR_ID = "pcs|b8cd25cd-4452-4d54-bd5e-e7d71459b702"
-
-CONNECTOR_POST_FIELDS = (
-    "connector_id",
-    "connector_name",
-    "connector_metadata",
-    "connector_version",
-    "connector_type",
-    "shared_to_org",
-)
+CONNECTOR_PATH = "connector/"
 
 
 class ConnectorPhase(Phase):
@@ -44,6 +36,13 @@ class ConnectorPhase(Phase):
 
     def run(self, report: MigrationReport) -> PhaseResult:
         result = report.get_phase(self.name)
+        try:
+            self._writable = self.ctx.target.get_post_schema(CONNECTOR_PATH)
+        except Exception as e:
+            logger.exception("Failed to fetch target POST schema for connector: %s", e)
+            result.failed += 1
+            result.errors.append(f"OPTIONS connector: {e}")
+            return result
         try:
             src_summaries = self.ctx.source.list_connectors()
         except Exception as e:
@@ -60,15 +59,6 @@ class ConnectorPhase(Phase):
     def _migrate_one(self, summary: dict[str, Any], result: PhaseResult) -> None:
         name = summary["connector_name"]
         src_id = summary["id"]
-        catalog_id = summary.get("connector_id")
-
-        if catalog_id == UCS_CONNECTOR_ID:
-            logger.info(
-                "skipping UCS connector '%s' (src=%s) — auto-provisioned per-org",
-                name, src_id,
-            )
-            result.skipped += 1
-            return
 
         try:
             src = self.ctx.source.get_connector(src_id)
@@ -76,6 +66,16 @@ class ConnectorPhase(Phase):
             logger.exception("Failed to GET source connector %s detail: %s", name, e)
             result.failed += 1
             result.errors.append(f"GET source detail {name}: {e}")
+            return
+
+        # Empty metadata means the backend redacted it (auto-provisioned rows
+        # like Unstract Cloud Storage). We cannot reconstruct it on target.
+        if not src.get("connector_metadata"):
+            logger.info(
+                "skipping connector '%s' (src=%s, catalog=%s) — source returned no metadata",
+                name, src_id, src.get("connector_id"),
+            )
+            result.skipped += 1
             return
 
         try:
@@ -102,7 +102,7 @@ class ConnectorPhase(Phase):
             logger.info("[dry-run] would create connector '%s' src=%s", name, src_id)
             return
         else:
-            payload = {k: src[k] for k in CONNECTOR_POST_FIELDS if k in src and src[k] is not None}
+            payload = {k: src[k] for k in self._writable if k in src and src[k] is not None}
             try:
                 tgt = self.ctx.target.create_connector(payload)
             except Exception as e:

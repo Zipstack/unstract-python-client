@@ -16,17 +16,20 @@ import logging
 from unstract.migration.client import PlatformClient
 from unstract.migration.context import MigrationContext, MigrationOptions, OrgEndpoint
 from unstract.migration.exceptions import MigrationError
-from unstract.migration.phases import AdapterPhase
+from unstract.migration.phases import AdapterPhase, ConnectorPhase, TagPhase
 from unstract.migration.phases.base import Phase
 from unstract.migration.report import MigrationReport
 
 logger = logging.getLogger(__name__)
 
 # Strict dependency order. Each entry: (phase_name, phase_class).
-# v1 vertical slice ships AdapterPhase only; remaining phases land in
-# follow-up commits per the plan.
+# Adapter, connector, tag are independent leaf phases. Downstream phases
+# (custom_tool, workflow, tool_instance, workflow_endpoint) land later
+# and consume the remap entries these produce.
 PHASES: list[tuple[str, type[Phase]]] = [
     ("adapter", AdapterPhase),
+    ("connector", ConnectorPhase),
+    ("tag", TagPhase),
 ]
 
 

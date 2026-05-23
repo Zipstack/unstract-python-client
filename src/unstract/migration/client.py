@@ -96,3 +96,40 @@ class PlatformClient:
 
     def create_adapter(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", "adapter/", json=payload)
+
+    # ----- connectors -----
+
+    def list_connectors(
+        self,
+        *,
+        name: str | None = None,
+        connector_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List connectors in this org, optionally filtered by name and/or type."""
+        params: dict[str, Any] = {}
+        if name is not None:
+            params["connector_name"] = name
+        if connector_type is not None:
+            params["connector_type"] = connector_type
+        result = self._request("GET", "connector/", params=params)
+        return result if isinstance(result, list) else result.get("results", [])
+
+    def get_connector(self, connector_pk: str) -> dict[str, Any]:
+        return self._request("GET", f"connector/{connector_pk}/")
+
+    def create_connector(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", "connector/", json=payload)
+
+    # ----- tags -----
+
+    def list_tags(self, *, name: str | None = None) -> list[dict[str, Any]]:
+        """List tags in this org, optionally filtered by exact name."""
+        params: dict[str, Any] = {}
+        if name is not None:
+            params["name"] = name
+        result = self._request("GET", "tags/", params=params)
+        # Tags endpoint uses pagination — accept either bare list or paginated envelope.
+        return result if isinstance(result, list) else result.get("results", [])
+
+    def create_tag(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", "tags/", json=payload)

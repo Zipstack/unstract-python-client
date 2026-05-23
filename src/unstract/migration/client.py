@@ -156,3 +156,73 @@ class PlatformClient:
 
     def create_tag(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", "tags/", json=payload)
+
+    # ----- custom tools (prompt studio) -----
+
+    def list_custom_tools(self) -> list[dict[str, Any]]:
+        """List all prompt-studio projects in this org. No name filter."""
+        result = self._request("GET", "prompt-studio/")
+        return result if isinstance(result, list) else result.get("results", [])
+
+    def get_custom_tool(self, tool_id: str) -> dict[str, Any]:
+        """Tool detail; response includes embedded ``prompts`` + ``default_profile``."""
+        return self._request("GET", f"prompt-studio/{tool_id}/")
+
+    def create_custom_tool(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create a custom tool. Backend also auto-creates one default ProfileManager."""
+        return self._request("POST", "prompt-studio/", json=payload)
+
+    def export_custom_tool(self, tool_id: str, *, force: bool = True) -> Any:
+        """Republish ``PromptStudioRegistry`` from the tool's current target state.
+
+        Used after profile+prompt reconciliation so the registry row is
+        rebuilt without the SDK ever carrying ``tool_metadata`` across orgs.
+        """
+        return self._request(
+            "POST",
+            f"prompt-studio/export/{tool_id}",
+            json={
+                "is_shared_with_org": False,
+                "user_id": [],
+                "force_export": force,
+            },
+        )
+
+    # ----- profile managers -----
+
+    def list_profiles(self, tool_id: str) -> list[dict[str, Any]]:
+        """List ProfileManager rows for a tool via the per-tool list action."""
+        result = self._request(
+            "GET", f"prompt-studio/prompt-studio-profile/{tool_id}/"
+        )
+        return result if isinstance(result, list) else result.get("results", [])
+
+    def create_profile(self, tool_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """POST to ``prompt-studio/profilemanager/{tool_id}`` (no trailing slash)."""
+        return self._request(
+            "POST", f"prompt-studio/profilemanager/{tool_id}", json=payload
+        )
+
+    def delete_profile(self, profile_id: str) -> None:
+        self._request("DELETE", f"profile-manager/{profile_id}/")
+
+    def set_default_profile(self, tool_id: str, profile_id: str) -> Any:
+        """Mark a single profile as default for this tool (zeros the rest)."""
+        return self._request(
+            "PATCH",
+            f"prompt-studio/prompt-studio-profile/{tool_id}/",
+            json={"default_profile": profile_id},
+        )
+
+    # ----- prompts -----
+
+    def list_prompts(self, *, tool_id: str) -> list[dict[str, Any]]:
+        """List prompts filtered by tool_id (FilterHelper-backed)."""
+        result = self._request("GET", "prompt/", params={"tool_id": tool_id})
+        return result if isinstance(result, list) else result.get("results", [])
+
+    def create_prompt(self, tool_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """POST to ``prompt-studio/prompt-studio-prompt/{tool_id}/`` (create_prompt action)."""
+        return self._request(
+            "POST", f"prompt-studio/prompt-studio-prompt/{tool_id}/", json=payload
+        )

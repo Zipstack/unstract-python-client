@@ -16,7 +16,12 @@ import logging
 from unstract.migration.client import PlatformClient
 from unstract.migration.context import MigrationContext, MigrationOptions, OrgEndpoint
 from unstract.migration.exceptions import MigrationError
-from unstract.migration.phases import AdapterPhase, ConnectorPhase, TagPhase
+from unstract.migration.phases import (
+    AdapterPhase,
+    ConnectorPhase,
+    CustomToolPhase,
+    TagPhase,
+)
 from unstract.migration.phases.base import Phase
 from unstract.migration.report import MigrationReport
 
@@ -30,6 +35,7 @@ PHASES: list[tuple[str, type[Phase]]] = [
     ("adapter", AdapterPhase),
     ("connector", ConnectorPhase),
     ("tag", TagPhase),
+    ("custom_tool", CustomToolPhase),
 ]
 
 

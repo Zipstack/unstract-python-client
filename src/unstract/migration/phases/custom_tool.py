@@ -44,14 +44,15 @@ _PROFILE_ADAPTER_FIELDS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _extract_adapter_id(value: Any) -> str | None:
-    """Profile FKs come back as nested dicts via serializer expansion;
-    pull the UUID back out for either flat-string or nested-dict shapes.
+def _extract_adapter_name(value: Any) -> str | None:
+    """ProfileManagerSerializer.to_representation renders adapter FKs as
+    flat strings holding the adapter NAME (not the UUID). Tolerate the
+    nested-dict shape too in case serializer behavior diverges.
     """
-    if isinstance(value, dict):
-        return value.get("id")
     if isinstance(value, str):
-        return value
+        return value or None
+    if isinstance(value, dict):
+        return value.get("adapter_name") or value.get("name") or value.get("id")
     return None
 
 
@@ -218,10 +219,13 @@ class CustomToolPhase(Phase):
     def _resolve_target_adapter_ids(
         self, src_tool_id: str, tool_name: str
     ) -> dict[str, str] | None:
-        """Read source default profile → remap each adapter UUID to target.
+        """Source profile carries adapter NAMES (per serializer); resolve
+        each name to a target adapter UUID via ``list_adapters(name=...)``.
 
         Returns ``None`` if any of the four required adapters can't be
-        resolved via the ``adapter`` remap — caller fails the tool.
+        found on target — caller fails the tool. AdapterPhase preserves
+        names across orgs so this lookup should always hit when the
+        adapter migration ran cleanly.
         """
         try:
             src_profiles = self.ctx.source.list_profiles(src_tool_id)
@@ -244,19 +248,26 @@ class CustomToolPhase(Phase):
 
         resolved: dict[str, str] = {}
         for src_field, form_field in _PROFILE_ADAPTER_FIELDS:
-            src_adapter_id = _extract_adapter_id(default.get(src_field))
-            if not src_adapter_id:
+            adapter_name = _extract_adapter_name(default.get(src_field))
+            if not adapter_name:
                 logger.warning(
                     "source default profile for tool '%s' missing adapter '%s'",
                     tool_name, src_field,
                 )
                 return None
-            tgt_adapter_id = self.ctx.remap.resolve("adapter", src_adapter_id)
-            if not tgt_adapter_id:
-                logger.warning(
-                    "no adapter remap for %s (field %s) on tool '%s'",
-                    src_adapter_id, src_field, tool_name,
+            try:
+                matches = self.ctx.target.list_adapters(name=adapter_name)
+            except Exception as e:
+                logger.exception(
+                    "list_adapters lookup failed for %s on tool '%s': %s",
+                    adapter_name, tool_name, e,
                 )
                 return None
-            resolved[form_field] = tgt_adapter_id
+            if not matches:
+                logger.warning(
+                    "no target adapter named '%s' for field %s on tool '%s'",
+                    adapter_name, src_field, tool_name,
+                )
+                return None
+            resolved[form_field] = matches[0]["id"]
         return resolved

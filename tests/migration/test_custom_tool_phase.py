@@ -2,14 +2,14 @@
 
 Coverage:
 - fresh path: ``export_project`` on source → ``import_project`` on
-  target with adapter ids resolved from source's default profile and
-  remapped via the adapter table.
+  target with adapter ids resolved by looking up each source-profile
+  adapter NAME against the target via ``list_adapters(name=...)``.
 - adopt path: existing target tool with matching name →
   ``sync_prompts`` overwrites prompts; no profile/adapter writes.
 - registry remap recorded after ``export_custom_tool``.
 - dry-run: no writes on either side.
 - abort on name conflict when option is set.
-- missing adapter remap fails the tool cleanly.
+- missing target adapter fails the tool cleanly.
 """
 
 from __future__ import annotations
@@ -26,14 +26,18 @@ from unstract.migration.phases.custom_tool import CustomToolPhase
 from unstract.migration.report import MigrationReport
 
 
-SRC_LLM = "11111111-1111-1111-1111-111111111111"
-SRC_EMB = "22222222-2222-2222-2222-222222222222"
-SRC_VEC = "33333333-3333-3333-3333-333333333333"
-SRC_X2T = "44444444-4444-4444-4444-444444444444"
-TGT_LLM = "a1111111-1111-1111-1111-111111111111"
-TGT_EMB = "a2222222-2222-2222-2222-222222222222"
-TGT_VEC = "a3333333-3333-3333-3333-333333333333"
-TGT_X2T = "a4444444-4444-4444-4444-444444444444"
+ADAPTER_NAMES = {
+    "llm": "gpt4",
+    "embedding_model": "ada-embed",
+    "vector_store": "pgvector",
+    "x2text": "llmw",
+}
+TGT_ADAPTER_IDS = {
+    "gpt4": "a1111111-1111-1111-1111-111111111111",
+    "ada-embed": "a2222222-2222-2222-2222-222222222222",
+    "pgvector": "a3333333-3333-3333-3333-333333333333",
+    "llmw": "a4444444-4444-4444-4444-444444444444",
+}
 SRC_REG = "55555555-5555-5555-5555-555555555555"
 
 
@@ -45,6 +49,7 @@ class FakeClient:
         self.profiles_by_tool: dict[str, list[dict]] = {}
         self.export_blobs: dict[str, dict] = {}
         self.registries_by_tool: dict[str, dict] = {}
+        self.adapters_by_name: dict[str, dict] = {}
         # Call recorders.
         self.import_calls: list[tuple[dict, dict | None]] = []
         self.sync_calls: list[tuple[str, dict, bool]] = []
@@ -68,6 +73,17 @@ class FakeClient:
 
     def export_project(self, tool_id: str) -> dict:
         return self.export_blobs[tool_id]
+
+    def list_adapters(
+        self,
+        *,
+        name: str | None = None,
+        adapter_type: str | None = None,
+    ) -> list[dict]:
+        if name is None:
+            return list(self.adapters_by_name.values())
+        ad = self.adapters_by_name.get(name)
+        return [ad] if ad else []
 
     def list_registries(self, *, custom_tool: str | None = None) -> list[dict]:
         if custom_tool is None:
@@ -116,37 +132,37 @@ def _ctx(source, target, *, remap=None, **opt_overrides) -> MigrationContext:
     )
 
 
-def _seed_adapter_remap(remap: RemapTable) -> None:
-    remap.record("adapter", SRC_LLM, TGT_LLM)
-    remap.record("adapter", SRC_EMB, TGT_EMB)
-    remap.record("adapter", SRC_VEC, TGT_VEC)
-    remap.record("adapter", SRC_X2T, TGT_X2T)
+def _seed_target_adapters(target: FakeClient) -> None:
+    """ProfileManagerSerializer surfaces adapter NAMES — target must
+    expose name → id lookups for the phase to resolve them.
+    """
+    for name, adapter_id in TGT_ADAPTER_IDS.items():
+        target.adapters_by_name[name] = {"id": adapter_id, "adapter_name": name}
 
 
-def _src_default_profile(*, nested: bool = True) -> dict:
-    """Mimic ProfileManager serializer output.
-
-    ``nested=True`` matches ``to_representation`` expanding FK adapters
-    into nested dicts; ``nested=False`` covers the raw-UUID fallback.
+def _src_default_profile(*, nested: bool = False) -> dict:
+    """Mirror the live ProfileManager serializer: adapter FKs render as
+    flat NAME strings. ``nested=True`` covers the alternate dict shape
+    in case backend behavior changes.
     """
     if nested:
         return {
             "profile_id": "src-profile-1",
             "profile_name": "Default",
             "is_default": True,
-            "llm": {"id": SRC_LLM, "adapter_name": "L"},
-            "embedding_model": {"id": SRC_EMB, "adapter_name": "E"},
-            "vector_store": {"id": SRC_VEC, "adapter_name": "V"},
-            "x2text": {"id": SRC_X2T, "adapter_name": "X"},
+            "llm": {"adapter_name": ADAPTER_NAMES["llm"]},
+            "embedding_model": {"adapter_name": ADAPTER_NAMES["embedding_model"]},
+            "vector_store": {"adapter_name": ADAPTER_NAMES["vector_store"]},
+            "x2text": {"adapter_name": ADAPTER_NAMES["x2text"]},
         }
     return {
         "profile_id": "src-profile-1",
         "profile_name": "Default",
         "is_default": True,
-        "llm": SRC_LLM,
-        "embedding_model": SRC_EMB,
-        "vector_store": SRC_VEC,
-        "x2text": SRC_X2T,
+        "llm": ADAPTER_NAMES["llm"],
+        "embedding_model": ADAPTER_NAMES["embedding_model"],
+        "vector_store": ADAPTER_NAMES["vector_store"],
+        "x2text": ADAPTER_NAMES["x2text"],
     }
 
 
@@ -170,7 +186,7 @@ def _src_export_blob(tool_name: str) -> dict:
 
 
 def _preload_source_tool(
-    client: FakeClient, tool_id: str, tool_name: str, *, nested_profile: bool = True
+    client: FakeClient, tool_id: str, tool_name: str, *, nested_profile: bool = False
 ) -> None:
     client.tools[tool_id] = {"tool_name": tool_name}
     client.profiles_by_tool[tool_id] = [_src_default_profile(nested=nested_profile)]
@@ -181,27 +197,26 @@ def _preload_source_tool(
     }
 
 
-def test_fresh_imports_with_remapped_adapter_ids_and_records_registry():
+def test_fresh_imports_with_name_resolved_adapter_ids_and_records_registry():
     src = FakeClient()
     tgt = FakeClient()
     _preload_source_tool(src, "src-tool-x", "Invoice Extractor")
-    remap = RemapTable()
-    _seed_adapter_remap(remap)
-    ctx = _ctx(src, tgt, remap=remap)
+    _seed_target_adapters(tgt)
+    ctx = _ctx(src, tgt)
 
     result = CustomToolPhase(ctx).run(MigrationReport())
 
     assert result.created == 1
     assert result.failed == 0
-    # Exactly one import_project call with the right export blob + remapped adapter ids.
+    # Exactly one import_project call with the right export blob + name-resolved adapter ids.
     assert len(tgt.import_calls) == 1
     blob, adapter_ids = tgt.import_calls[0]
     assert blob["tool_metadata"]["tool_name"] == "Invoice Extractor"
     assert adapter_ids == {
-        "llm_adapter_id": TGT_LLM,
-        "vector_db_adapter_id": TGT_VEC,
-        "embedding_adapter_id": TGT_EMB,
-        "x2text_adapter_id": TGT_X2T,
+        "llm_adapter_id": TGT_ADAPTER_IDS["gpt4"],
+        "vector_db_adapter_id": TGT_ADAPTER_IDS["pgvector"],
+        "embedding_adapter_id": TGT_ADAPTER_IDS["ada-embed"],
+        "x2text_adapter_id": TGT_ADAPTER_IDS["llmw"],
     }
     # No sync_prompts on fresh path.
     assert tgt.sync_calls == []
@@ -215,18 +230,17 @@ def test_fresh_imports_with_remapped_adapter_ids_and_records_registry():
     assert ctx.remap.resolve("prompt_studio_registry", SRC_REG) == tgt_reg_id
 
 
-def test_flat_uuid_profile_also_resolves_adapter_ids():
+def test_nested_adapter_dict_also_resolves():
     src = FakeClient()
     tgt = FakeClient()
-    _preload_source_tool(src, "src-tool-x", "T", nested_profile=False)
-    remap = RemapTable()
-    _seed_adapter_remap(remap)
-    ctx = _ctx(src, tgt, remap=remap)
+    _preload_source_tool(src, "src-tool-x", "T", nested_profile=True)
+    _seed_target_adapters(tgt)
+    ctx = _ctx(src, tgt)
 
     CustomToolPhase(ctx).run(MigrationReport())
 
     _, adapter_ids = tgt.import_calls[0]
-    assert adapter_ids["llm_adapter_id"] == TGT_LLM
+    assert adapter_ids["llm_adapter_id"] == TGT_ADAPTER_IDS["gpt4"]
 
 
 def test_adopt_path_calls_sync_prompts_and_skips_import():
@@ -236,9 +250,8 @@ def test_adopt_path_calls_sync_prompts_and_skips_import():
     # Target already has the tool with the same name.
     tgt.tools["tgt-existing"] = {"tool_name": "Invoice Extractor"}
 
-    remap = RemapTable()
-    _seed_adapter_remap(remap)
-    ctx = _ctx(src, tgt, remap=remap)
+    _seed_target_adapters(tgt)
+    ctx = _ctx(src, tgt)
 
     result = CustomToolPhase(ctx).run(MigrationReport())
 
@@ -263,9 +276,8 @@ def test_abort_on_name_conflict_raises():
     _preload_source_tool(src, "src-tool-x", "Conflict")
     tgt.tools["tgt-existing"] = {"tool_name": "Conflict"}
 
-    remap = RemapTable()
-    _seed_adapter_remap(remap)
-    ctx = _ctx(src, tgt, remap=remap, on_name_conflict="abort")
+    _seed_target_adapters(tgt)
+    ctx = _ctx(src, tgt, on_name_conflict="abort")
 
     with pytest.raises(NameConflictError):
         CustomToolPhase(ctx).run(MigrationReport())
@@ -278,9 +290,8 @@ def test_dry_run_makes_no_writes():
     src = FakeClient()
     tgt = FakeClient()
     _preload_source_tool(src, "src-tool-x", "T")
-    remap = RemapTable()
-    _seed_adapter_remap(remap)
-    ctx = _ctx(src, tgt, remap=remap, dry_run=True)
+    _seed_target_adapters(tgt)
+    ctx = _ctx(src, tgt, dry_run=True)
 
     result = CustomToolPhase(ctx).run(MigrationReport())
 
@@ -290,16 +301,14 @@ def test_dry_run_makes_no_writes():
     assert tgt.export_tool_calls == []
 
 
-def test_missing_adapter_remap_fails_tool_cleanly():
+def test_missing_target_adapter_fails_tool_cleanly():
     src = FakeClient()
     tgt = FakeClient()
     _preload_source_tool(src, "src-tool-x", "T")
-    # Only seed 3 of 4 adapters → x2text remap missing.
-    remap = RemapTable()
-    remap.record("adapter", SRC_LLM, TGT_LLM)
-    remap.record("adapter", SRC_EMB, TGT_EMB)
-    remap.record("adapter", SRC_VEC, TGT_VEC)
-    ctx = _ctx(src, tgt, remap=remap)
+    # Only seed 3 of 4 adapters → x2text lookup misses on target.
+    for name in ("gpt4", "ada-embed", "pgvector"):
+        tgt.adapters_by_name[name] = {"id": TGT_ADAPTER_IDS[name], "adapter_name": name}
+    ctx = _ctx(src, tgt)
 
     result = CustomToolPhase(ctx).run(MigrationReport())
 

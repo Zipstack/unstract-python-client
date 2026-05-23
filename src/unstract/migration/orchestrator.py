@@ -18,8 +18,10 @@ from unstract.migration.context import MigrationContext, MigrationOptions, OrgEn
 from unstract.migration.exceptions import MigrationError
 from unstract.migration.phases import (
     AdapterPhase,
+    APIDeploymentPhase,
     ConnectorPhase,
     CustomToolPhase,
+    PipelinePhase,
     TagPhase,
     ToolInstancePhase,
     WorkflowEndpointPhase,
@@ -33,7 +35,9 @@ logger = logging.getLogger(__name__)
 # Strict dependency order. Each entry: (phase_name, phase_class).
 # Adapter, connector, tag are independent leaf phases. Downstream phases
 # (custom_tool, workflow, tool_instance, workflow_endpoint) land later
-# and consume the remap entries these produce.
+# and consume the remap entries these produce. Pipeline + api_deployment
+# come last: both FK the workflow and api_deployment additionally
+# requires endpoints to be configured before the serializer accepts it.
 PHASES: list[tuple[str, type[Phase]]] = [
     ("adapter", AdapterPhase),
     ("connector", ConnectorPhase),
@@ -42,6 +46,8 @@ PHASES: list[tuple[str, type[Phase]]] = [
     ("workflow", WorkflowPhase),
     ("tool_instance", ToolInstancePhase),
     ("workflow_endpoint", WorkflowEndpointPhase),
+    ("pipeline", PipelinePhase),
+    ("api_deployment", APIDeploymentPhase),
 ]
 
 

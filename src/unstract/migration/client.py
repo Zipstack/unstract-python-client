@@ -353,3 +353,87 @@ class PlatformClient:
         return self._request(
             "PATCH", f"workflow/endpoint/{endpoint_id}/", json=payload
         )
+
+    # ----- pipelines (ETL / TASK) -----
+
+    def list_pipelines(
+        self,
+        *,
+        name: str | None = None,
+        pipeline_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List pipelines in this org, optionally filtered by exact name
+        and/or pipeline_type (``ETL`` / ``TASK`` / ``APP``).
+        """
+        params: dict[str, Any] = {}
+        if name is not None:
+            params["pipeline_name"] = name
+        if pipeline_type is not None:
+            params["type"] = pipeline_type
+        result = self._request("GET", "pipeline/", params=params)
+        return result if isinstance(result, list) else result.get("results", [])
+
+    def get_pipeline(self, pipeline_id: str) -> dict[str, Any]:
+        return self._request("GET", f"pipeline/{pipeline_id}/")
+
+    def create_pipeline(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create a pipeline. Backend force-sets ``active=True`` and auto-creates
+        a single active API key on the new pipeline.
+        """
+        return self._request("POST", "pipeline/", json=payload)
+
+    def update_pipeline(
+        self, pipeline_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self._request("PATCH", f"pipeline/{pipeline_id}/", json=payload)
+
+    # ----- API deployments -----
+
+    def list_api_deployments(
+        self,
+        *,
+        api_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List API deployments in this org, optionally filtered by exact api_name."""
+        params: dict[str, Any] = {}
+        if api_name is not None:
+            params["api_name"] = api_name
+        result = self._request("GET", "api/deployment/", params=params)
+        return result if isinstance(result, list) else result.get("results", [])
+
+    def get_api_deployment(self, deployment_id: str) -> dict[str, Any]:
+        return self._request("GET", f"api/deployment/{deployment_id}/")
+
+    def create_api_deployment(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create an API deployment. Backend auto-creates a single active key
+        and returns it in the response under ``api_key``.
+        """
+        return self._request("POST", "api/deployment/", json=payload)
+
+    def update_api_deployment(
+        self, deployment_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self._request(
+            "PATCH", f"api/deployment/{deployment_id}/", json=payload
+        )
+
+    # ----- API keys (per pipeline / deployment) -----
+
+    def list_pipeline_keys(self, pipeline_id: str) -> list[dict[str, Any]]:
+        """List API keys belonging to a pipeline."""
+        result = self._request("GET", f"api/keys/pipeline/{pipeline_id}/")
+        return result if isinstance(result, list) else result.get("results", [])
+
+    def list_api_deployment_keys(self, deployment_id: str) -> list[dict[str, Any]]:
+        """List API keys belonging to an API deployment."""
+        result = self._request("GET", f"api/keys/api/{deployment_id}/")
+        return result if isinstance(result, list) else result.get("results", [])
+
+    def create_api_key(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create an extra API key tied to a pipeline or deployment.
+
+        Used to mirror non-default keys (e.g. an additional rotated key)
+        on the target. The ``api_key`` UUID itself is server-generated
+        and cannot be carried over from source.
+        """
+        return self._request("POST", "api/keys/api/", json=payload)

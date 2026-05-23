@@ -23,7 +23,7 @@ import logging
 from typing import Any
 
 from unstract.migration.exceptions import NameConflictError
-from unstract.migration.phases.base import Phase
+from unstract.migration.phases.base import Phase, build_post_payload
 from unstract.migration.report import MigrationReport, PhaseResult
 
 logger = logging.getLogger(__name__)
@@ -102,7 +102,7 @@ class ConnectorPhase(Phase):
             logger.info("[dry-run] would create connector '%s' src=%s", name, src_id)
             return
         else:
-            payload = {k: src[k] for k in self._writable if k in src and src[k] is not None}
+            payload = build_post_payload(src, self._writable)
             try:
                 tgt = self.ctx.target.create_connector(payload)
             except Exception as e:

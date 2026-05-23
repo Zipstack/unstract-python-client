@@ -10,6 +10,7 @@ Auth: ``Authorization: Bearer <platform_api_key>``.
 
 from __future__ import annotations
 
+import json as json_lib
 import logging
 from typing import Any
 
@@ -54,6 +55,8 @@ class PlatformClient:
         *,
         params: dict[str, Any] | None = None,
         json: Any = None,
+        files: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
     ) -> Any:
         url = self._url(path)
         # Redact secrets from logs: only entity path + method, never body.
@@ -63,6 +66,8 @@ class PlatformClient:
             url,
             params=params,
             json=json,
+            files=files,
+            data=data,
             timeout=self.timeout,
             verify=self.verify,
         )
@@ -164,19 +169,95 @@ class PlatformClient:
         result = self._request("GET", "prompt-studio/")
         return result if isinstance(result, list) else result.get("results", [])
 
-    def get_custom_tool(self, tool_id: str) -> dict[str, Any]:
-        """Tool detail; response includes embedded ``prompts`` + ``default_profile``."""
-        return self._request("GET", f"prompt-studio/{tool_id}/")
+    def list_profiles(self, tool_id: str) -> list[dict[str, Any]]:
+        """List ProfileManager rows for a tool.
 
-    def create_custom_tool(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Create a custom tool. Backend also auto-creates one default ProfileManager."""
-        return self._request("POST", "prompt-studio/", json=payload)
+        Migration reads this on the source only — to discover the
+        default profile's adapter UUIDs so they can be remapped to
+        target adapter ids for ``import_project``.
+        """
+        result = self._request(
+            "GET", f"prompt-studio/prompt-studio-profile/{tool_id}/"
+        )
+        return result if isinstance(result, list) else result.get("results", [])
+
+    def export_project(self, tool_id: str) -> dict[str, Any]:
+        """Export a prompt-studio project as a portable JSON blob.
+
+        Bundles ``tool_metadata``, ``tool_settings``,
+        ``default_profile_settings``, ``prompts``, ``export_metadata`` in
+        one shot — feed straight into ``import_project`` or
+        ``sync_prompts`` on the target.
+        """
+        return self._request("GET", f"prompt-studio/project-transfer/{tool_id}")
+
+    def import_project(
+        self,
+        export_data: dict[str, Any],
+        adapter_ids: dict[str, str | None] | None = None,
+    ) -> dict[str, Any]:
+        """Import a prompt-studio project from an export blob.
+
+        Backend creates the tool, builds the default ProfileManager from
+        the supplied target-org adapter ids, and imports all prompts in
+        one call. On name collision the backend silently uniquifies the
+        new tool's name — callers should pre-check via
+        ``list_custom_tools`` to avoid that.
+
+        ``adapter_ids`` keys are the backend's form fields:
+        ``llm_adapter_id``, ``vector_db_adapter_id``,
+        ``embedding_adapter_id``, ``x2text_adapter_id``. All four
+        required to wire the profile; otherwise backend falls back to
+        a profile without adapters and flags ``needs_adapter_config``.
+        """
+        tool_name = (
+            export_data.get("tool_metadata", {}).get("tool_name") or "export"
+        )
+        content = json_lib.dumps(export_data).encode()
+        files = {"file": (f"{tool_name}.json", content, "application/json")}
+        data: dict[str, Any] = {}
+        if adapter_ids:
+            for key in (
+                "llm_adapter_id",
+                "vector_db_adapter_id",
+                "embedding_adapter_id",
+                "x2text_adapter_id",
+            ):
+                val = adapter_ids.get(key)
+                if val:
+                    data[key] = val
+        return self._request(
+            "POST",
+            "prompt-studio/project-transfer/",
+            files=files,
+            data=data,
+        )
+
+    def sync_prompts(
+        self,
+        tool_id: str,
+        export_data: dict[str, Any],
+        *,
+        create_copy: bool = False,
+    ) -> dict[str, Any]:
+        """Rip-and-replace prompts on an existing target tool.
+
+        Adopt path: target tool already exists with its own
+        adapter-bound profiles. This overwrites its prompt set (and
+        ``tool_settings``) from source; profiles and uploaded documents
+        are left untouched.
+        """
+        payload = {"data": export_data, "create_copy": create_copy}
+        return self._request(
+            "POST", f"prompt-studio/{tool_id}/sync-prompts/", json=payload
+        )
 
     def export_custom_tool(self, tool_id: str, *, force: bool = True) -> Any:
-        """Republish ``PromptStudioRegistry`` from the tool's current target state.
+        """Republish ``PromptStudioRegistry`` from the tool's current state.
 
-        Used after profile+prompt reconciliation so the registry row is
-        rebuilt without the SDK ever carrying ``tool_metadata`` across orgs.
+        Called after import/sync so the registry row reflects the
+        freshly landed prompts. Required for ToolInstancePhase to find
+        a target registry id to remap.
         """
         return self._request(
             "POST",
@@ -186,45 +267,6 @@ class PlatformClient:
                 "user_id": [],
                 "force_export": force,
             },
-        )
-
-    # ----- profile managers -----
-
-    def list_profiles(self, tool_id: str) -> list[dict[str, Any]]:
-        """List ProfileManager rows for a tool via the per-tool list action."""
-        result = self._request(
-            "GET", f"prompt-studio/prompt-studio-profile/{tool_id}/"
-        )
-        return result if isinstance(result, list) else result.get("results", [])
-
-    def create_profile(self, tool_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """POST to ``prompt-studio/profilemanager/{tool_id}`` (no trailing slash)."""
-        return self._request(
-            "POST", f"prompt-studio/profilemanager/{tool_id}", json=payload
-        )
-
-    def delete_profile(self, profile_id: str) -> None:
-        self._request("DELETE", f"profile-manager/{profile_id}/")
-
-    def set_default_profile(self, tool_id: str, profile_id: str) -> Any:
-        """Mark a single profile as default for this tool (zeros the rest)."""
-        return self._request(
-            "PATCH",
-            f"prompt-studio/prompt-studio-profile/{tool_id}/",
-            json={"default_profile": profile_id},
-        )
-
-    # ----- prompts -----
-
-    def list_prompts(self, *, tool_id: str) -> list[dict[str, Any]]:
-        """List prompts filtered by tool_id (FilterHelper-backed)."""
-        result = self._request("GET", "prompt/", params={"tool_id": tool_id})
-        return result if isinstance(result, list) else result.get("results", [])
-
-    def create_prompt(self, tool_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """POST to ``prompt-studio/prompt-studio-prompt/{tool_id}/`` (create_prompt action)."""
-        return self._request(
-            "POST", f"prompt-studio/prompt-studio-prompt/{tool_id}/", json=payload
         )
 
     # ----- workflows -----

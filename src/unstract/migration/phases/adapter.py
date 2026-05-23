@@ -4,9 +4,9 @@ Reference implementation for the get-or-create pattern: list-by-name GET
 against target, POST create if missing, record source->target UUID in the
 remap table for downstream phases.
 
-``AdapterInstanceManager.for_user(service_account)`` returns only
-non-frictionless adapters, so frictionless onboarding adapters are
-intentionally excluded from migration.
+Frictionless onboarding adapters are excluded — the backend's
+service-account queryset already filters them out, so migration never
+sees them.
 """
 
 from __future__ import annotations
@@ -55,8 +55,7 @@ class AdapterPhase(Phase):
         name = summary["adapter_name"]
         atype = summary["adapter_type"]
         src_id = summary["id"]
-        # List response omits adapter_metadata (see AdapterListSerializer);
-        # fetch the detail endpoint to pick up the decrypted metadata.
+        # List response omits adapter_metadata; fetch detail to pick it up.
         try:
             src = self.ctx.source.get_adapter(src_id)
         except Exception as e:

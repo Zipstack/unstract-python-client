@@ -1,14 +1,11 @@
 """Thin Platform API client for the migration subpackage.
 
 One ``PlatformClient`` instance per ``OrgEndpoint``. Methods are entity-
-scoped (``list_adapters``, ``create_adapter``, ...) so the call sites in
-phases read like business logic, not HTTP plumbing.
+scoped (``list_adapters``, ``create_adapter``, ...) so call sites in phases
+read like business logic, not HTTP plumbing.
 
-URL shape (see ``backend/middleware/organization_middleware.py``):
-    {base_url}/api/v2/unstract/{org_id}/<entity>/
-
-Auth: ``Authorization: Bearer <platform_api_key>`` (see
-``backend/account_v2/custom_auth_middleware.py``).
+URL shape: ``{base_url}/{api_path_prefix}/unstract/{organization_id}/<entity>/``
+Auth: ``Authorization: Bearer <platform_api_key>``.
 """
 
 from __future__ import annotations

@@ -23,13 +23,9 @@ if TYPE_CHECKING:
 class OrgEndpoint:
     """One end of a migration: where to talk to and who to talk as.
 
-    ``organization_id`` is the slug embedded in the URL path (see
-    ``OrganizationMiddleware`` regex ``/api/(v1|v2)/unstract/<org_id>/...``).
-    ``platform_key`` is the bearer UUID issued by an org admin.
-
-    ``api_path_prefix`` defaults to ``api/v1`` to match the OSS docker
-    compose ``PATH_PREFIX`` env. Cloud / on-prem envs that mount on a
-    different prefix can override (e.g. ``api/v2``).
+    ``organization_id`` is the slug embedded in the URL path; the bearer
+    Platform API key must belong to this org. ``api_path_prefix`` matches
+    the deployment's URL prefix (defaults to ``api/v1``).
     """
 
     base_url: str

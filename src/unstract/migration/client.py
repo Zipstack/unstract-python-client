@@ -226,3 +226,20 @@ class PlatformClient:
         return self._request(
             "POST", f"prompt-studio/prompt-studio-prompt/{tool_id}/", json=payload
         )
+
+    # ----- workflows -----
+
+    def list_workflows(self, *, name: str | None = None) -> list[dict[str, Any]]:
+        """List workflows in this org, optionally filtered by exact name."""
+        params: dict[str, Any] = {}
+        if name is not None:
+            params["workflow_name"] = name
+        result = self._request("GET", "workflow/", params=params)
+        return result if isinstance(result, list) else result.get("results", [])
+
+    def get_workflow(self, workflow_id: str) -> dict[str, Any]:
+        return self._request("GET", f"workflow/{workflow_id}/")
+
+    def create_workflow(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create a workflow. Backend auto-creates empty WorkflowEndpoints for it."""
+        return self._request("POST", "workflow/", json=payload)

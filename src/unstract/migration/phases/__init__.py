@@ -12,5 +12,13 @@ from unstract.migration.phases.base import Phase
 from unstract.migration.phases.connector import ConnectorPhase
 from unstract.migration.phases.custom_tool import CustomToolPhase
 from unstract.migration.phases.tag import TagPhase
+from unstract.migration.phases.workflow import WorkflowPhase
 
-__all__ = ["AdapterPhase", "ConnectorPhase", "CustomToolPhase", "Phase", "TagPhase"]
+__all__ = [
+    "AdapterPhase",
+    "ConnectorPhase",
+    "CustomToolPhase",
+    "Phase",
+    "TagPhase",
+    "WorkflowPhase",
+]

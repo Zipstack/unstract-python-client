@@ -243,3 +243,71 @@ class PlatformClient:
     def create_workflow(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Create a workflow. Backend auto-creates empty WorkflowEndpoints for it."""
         return self._request("POST", "workflow/", json=payload)
+
+    # ----- prompt studio registry -----
+
+    def list_registries(
+        self, *, custom_tool: str | None = None
+    ) -> list[dict[str, Any]]:
+        """List PromptStudioRegistry rows. The list endpoint returns nothing
+        unless a filter is supplied; pass ``custom_tool`` to look up the
+        registry id for a given tool.
+        """
+        params: dict[str, Any] = {}
+        if custom_tool is not None:
+            params["custom_tool"] = custom_tool
+        result = self._request("GET", "prompt-studio/registry/", params=params)
+        return result if isinstance(result, list) else result.get("results", [])
+
+    # ----- tool instances -----
+
+    def list_tool_instances(
+        self, *, workflow_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """List ToolInstance rows, optionally scoped to a workflow."""
+        params: dict[str, Any] = {}
+        if workflow_id is not None:
+            params["workflow"] = workflow_id
+        result = self._request("GET", "tool_instance/", params=params)
+        return result if isinstance(result, list) else result.get("results", [])
+
+    def create_tool_instance(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create a tool instance (max 1 per workflow). The backend overwrites
+        the ``metadata`` field with tool defaults — caller must PATCH after
+        create to transfer source metadata.
+        """
+        return self._request("POST", "tool_instance/", json=payload)
+
+    def update_tool_instance_metadata(
+        self, instance_id: str, metadata: dict[str, Any]
+    ) -> dict[str, Any]:
+        """PATCH a tool instance's metadata. Backend resolves adapter names
+        in the payload to local UUIDs via ``update_instance_metadata``.
+        """
+        return self._request(
+            "PATCH", f"tool_instance/{instance_id}/", json={"metadata": metadata}
+        )
+
+    # ----- workflow endpoints -----
+
+    def list_workflow_endpoints(
+        self, *, workflow_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """List workflow endpoints, optionally filtered by workflow id.
+
+        The backend auto-creates one SOURCE and one DESTINATION endpoint
+        per workflow, so a workflow filter typically returns exactly two
+        rows.
+        """
+        params: dict[str, Any] = {}
+        if workflow_id is not None:
+            params["workflow"] = workflow_id
+        result = self._request("GET", "workflow/endpoint/", params=params)
+        return result if isinstance(result, list) else result.get("results", [])
+
+    def update_workflow_endpoint(
+        self, endpoint_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self._request(
+            "PATCH", f"workflow/endpoint/{endpoint_id}/", json=payload
+        )

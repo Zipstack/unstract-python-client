@@ -21,6 +21,8 @@ from unstract.migration.phases import (
     ConnectorPhase,
     CustomToolPhase,
     TagPhase,
+    ToolInstancePhase,
+    WorkflowEndpointPhase,
     WorkflowPhase,
 )
 from unstract.migration.phases.base import Phase
@@ -38,6 +40,8 @@ PHASES: list[tuple[str, type[Phase]]] = [
     ("tag", TagPhase),
     ("custom_tool", CustomToolPhase),
     ("workflow", WorkflowPhase),
+    ("tool_instance", ToolInstancePhase),
+    ("workflow_endpoint", WorkflowEndpointPhase),
 ]
 
 

@@ -49,6 +49,7 @@ class FakeClient:
         self.tools: dict[str, dict] = {}
         self.profiles_by_tool: dict[str, list[dict]] = {}
         self.prompts_by_tool: dict[str, list[dict]] = {}
+        self.registries_by_tool: dict[str, dict] = {}
         self.export_calls: list[str] = []
         self._next = 1
 
@@ -88,6 +89,17 @@ class FakeClient:
 
     def export_custom_tool(self, tool_id: str, *, force: bool = True) -> None:
         self.export_calls.append(tool_id)
+        # Mimic the backend: export creates/updates a registry row for the tool.
+        self.registries_by_tool.setdefault(
+            tool_id,
+            {"prompt_registry_id": self._mint("registry"), "custom_tool": tool_id},
+        )
+
+    def list_registries(self, *, custom_tool: str | None = None) -> list[dict]:
+        if custom_tool is None:
+            return list(self.registries_by_tool.values())
+        reg = self.registries_by_tool.get(custom_tool)
+        return [reg] if reg else []
 
     # --- profiles ---
     def list_profiles(self, tool_id: str) -> list[dict]:
@@ -193,6 +205,10 @@ def _preload_source(client: FakeClient, tool_id: str) -> dict:
     client.tools[tool_id] = tool
     client.profiles_by_tool[tool_id] = [profile]
     client.prompts_by_tool[tool_id] = [prompt]
+    client.registries_by_tool[tool_id] = {
+        "prompt_registry_id": "55555555-5555-5555-5555-555555555555",
+        "custom_tool": tool_id,
+    }
     return tool
 
 
@@ -244,6 +260,10 @@ def test_fresh_tool_creates_tool_profiles_prompts_and_republishes():
     assert ctx.remap.resolve("custom_tool", "src-tool-x") == tgt_tool_id
     assert ctx.remap.resolve("profile_manager", "src-profile-1") == profile["profile_id"]
     assert ctx.remap.resolve("prompt", "src-prompt-1") == prompts[0]["prompt_id"]
+    # Registry remap recorded for ToolInstancePhase consumption.
+    assert ctx.remap.resolve(
+        "prompt_studio_registry", "55555555-5555-5555-5555-555555555555"
+    ) == tgt.registries_by_tool[tgt_tool_id]["prompt_registry_id"]
 
 
 def test_idempotent_rerun_does_not_create_duplicates():

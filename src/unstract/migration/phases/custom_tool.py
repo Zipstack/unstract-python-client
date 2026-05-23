@@ -191,6 +191,29 @@ class CustomToolPhase(Phase):
             logger.exception("Registry republish failed for tool %s: %s", tool_name, e)
             result.failed += 1
             result.errors.append(f"export {tool_name}: {e}")
+            return
+
+        # Record the registry-id remap so ToolInstancePhase can rewrite
+        # ToolInstance.tool_id (which holds a registry UUID as CharField).
+        # Source-side registry exists only if the operator already published
+        # the tool; un-published tools have no ToolInstance to migrate.
+        try:
+            src_regs = self.ctx.source.list_registries(custom_tool=src_tool_id)
+            tgt_regs = self.ctx.target.list_registries(custom_tool=tgt_tool_id)
+        except Exception as e:
+            logger.warning(
+                "registry remap lookup failed for tool '%s' (downstream "
+                "ToolInstance migration may skip): %s",
+                tool_name, e,
+            )
+            return
+
+        if src_regs and tgt_regs:
+            src_reg_id = src_regs[0]["prompt_registry_id"]
+            tgt_reg_id = tgt_regs[0]["prompt_registry_id"]
+            self.ctx.remap.record(
+                "prompt_studio_registry", src_reg_id, tgt_reg_id
+            )
 
     def _get_or_create_tool(
         self, src_tool: dict[str, Any], result: PhaseResult

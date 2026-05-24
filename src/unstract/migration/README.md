@@ -1,10 +1,11 @@
 # Org-to-Org Migration
 
-Move an Unstract organization's resources from one deployment to another over the Platform API.
+Move an Unstract organization's configured resources from one deployment to another (or between two orgs on the same deployment).
 
-Source and target can be the same instance (org-to-org on one deployment) or two different instances (one URL to another). The only requirement is that both expose the Platform API and you hold an admin key on each.
+Carried over: adapters, connectors, custom tools, prompts, profiles, workflows, tool instances, workflow endpoints, tags, API deployments, pipelines, and Prompt Studio document files.
 
-What gets carried over: adapters, connectors, custom tools, prompts, profiles, workflows, tool instances, workflow endpoints, tags, API deployments, pipelines, and Prompt Studio document files.
+> **Full documentation, behavior notes, CLI reference, and sample report:**
+> https://docs.unstract.com/unstract/unstract_platform/api_documentation/versions/v1-org-migration/
 
 ## Quickstart
 
@@ -18,127 +19,20 @@ uv run python -m unstract.migration migrate \
   --target-org my-target-org
 ```
 
-You need an **org admin Platform API key** for both ends.
+Both keys must be **org admin Platform API keys**.
 
 > [!WARNING]
-> Both keys grant full read on source and full write on target. Run from a trusted machine and **rotate both keys after the migration completes**.
-
-## How it works
-
-The tool walks resources in dependency order. Each phase migrates one type and remembers the new IDs so later phases can rewrite references before posting.
-
-```
-1. adapter           7. republish_tool
-2. connector         8. files                  (Prompt Studio documents)
-3. tag               9. workflow
-4. custom_tool      10. tool_instance
-5. profile_manager  11. workflow_endpoint
-6. prompt           12. api_deployment
-                    13. pipeline
-```
+> Both keys grant broad access. Run from a trusted machine and rotate both keys after the migration completes.
 
 ## Re-runs are safe
 
-Stop the script mid-run, fix what broke, run the same command again — it picks up where it left off. The tool checks the target by name before creating anything; resources that already exist are reused.
-
-A clean re-run after a successful migration does no writes and finishes in 1–2 minutes (a first run on a moderate corpus takes 7–10).
-
-There is no resume flag and no state file. The target *is* the state — if you delete a resource on the target between runs, the next run recreates it.
-
-## If something fails partway
-
-Each resource is its own request and its own transaction. There is no all-or-nothing rollback for a phase.
-
-1. Read the printed `MigrationReport` — it lists completed phases and the entity that failed.
-2. Fix the underlying issue.
-3. Re-run the same command.
-
-> [!NOTE]
-> API deployments and pipelines get a **new API key minted on the target**. Downstream consumers must be updated with the new key.
-
-> [!NOTE]
-> Pipelines are created **paused** on the target so scheduled runs don't fire during cut-over. Unpause them once you're ready. Override with `--no-pipelines-paused`.
+If a phase fails partway, fix the cause and re-run the same command. Resources already on the target are detected by name and reused. There is no `--resume-from` flag — the target is the state.
 
 ## Files
 
-The Prompt Studio document corpus is the only thing with actual bytes on disk. Default strategy downloads each file from source and uploads to target, one at a time, capped at 25 MB per file by default.
-
-| `--file-strategy` | Behavior |
-|-------------------|----------|
-| `platform_api` (default) | Transfer each file via the Platform API. Files over `--max-file-size` are skipped and listed at the end for manual re-upload. |
-| `skip` | Don't transfer any files. Document records are still created on the target. Equivalent to `--skip-files`. |
+The Prompt Studio document corpus is the only resource type with bytes on disk. Default cap per file is 25 MB; oversize files are reported for manual re-upload. Use `--skip-files` to skip bytes entirely (document records are still created).
 
 > [!WARNING]
-> If you run migrations while users are actively uploading to the same source org, you can end up with duplicate file records on the target. **Run migrations in low-activity windows.**
+> Run migrations during low-activity windows. Concurrent uploads to the source org during a migration can create duplicate file records on the target.
 
-> [!NOTE]
-> If a file is missing on disk (skipped, oversize, or a mid-run crash), the platform stays usable. Only operations that touch that specific file (preview, index, prompt run) will error. Re-upload missing files through the UI.
-
-## What you'll see in the report
-
-At the end of every run, a `MigrationReport` is printed. Per-phase counts up top, then any files that need follow-up, then a remap summary, then a status footer.
-
-Counts per phase: `Created` (new on target), `Adopted` (already existed, reused), `Skipped`, `Failed`.
-
-```
-                          Migration Report
-┏━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━┓
-┃ Phase                ┃ Created ┃ Adopted ┃ Skipped ┃ Failed ┃
-┡━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━┩
-│ adapter              │       6 │       2 │       0 │      0 │
-│ connector            │       3 │       0 │       0 │      0 │
-│ tag                  │       4 │       0 │       0 │      0 │
-│ custom_tool          │      12 │       1 │       0 │      0 │
-│ files                │      87 │       0 │       3 │      1 │
-│ workflow             │       5 │       0 │       0 │      0 │
-│ tool_instance        │       5 │       0 │       0 │      0 │
-│ workflow_endpoint    │      10 │       0 │       0 │      0 │
-│ api_deployment       │       2 │       0 │       0 │      0 │
-│ pipeline             │       1 │       0 │       0 │      0 │
-├──────────────────────┼─────────┼─────────┼─────────┼────────┤
-│ TOTAL                │     135 │       3 │       3 │      1 │
-└──────────────────────┴─────────┴─────────┴─────────┴────────┘
-Files uploaded: 87
-Oversize files (manual upload required):
-  - tool=invoice-extractor file=scan-2023-archive.pdf size=41.2MB cap=25.0MB
-Failed files:
-  - tool=contracts file=draft.docx error=upload timed out
-Remap entries: adapter=8, connector=3, tag=4, custom_tool=13, workflow=5, ...
-Completed with 1 failure(s) — see WARNING/ERROR log lines above for details
-```
-
-A clean run ends with `Completed successfully`. A run aborted by `--on-name-conflict=abort` ends with `ABORTED: <reason>`.
-
-The same data is available programmatically via `report.as_dict()` — useful if you're wrapping the command in your own automation.
-
-## CLI reference
-
-### Environment
-
-| Var | Required | Purpose |
-|-----|----------|---------|
-| `UNSTRACT_SRC_PLATFORM_KEY` | yes | Source org admin Platform API key |
-| `UNSTRACT_TGT_PLATFORM_KEY` | yes | Target org admin Platform API key |
-
-### Flags
-
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--source-url` / `--target-url` | — | Base URLs of both deployments |
-| `--source-org` / `--target-org` | — | Org slugs |
-| `--api-prefix` | `api/v1` | URL prefix for the Platform API |
-| `--include` / `--exclude` | all / none | Comma-separated phase names |
-| `--dry-run` | off | List actions without writing |
-| `--on-name-conflict` | `adopt` | `adopt` reuses existing target resources; `abort` stops on conflict |
-| `--file-strategy` | `platform_api` | `platform_api` or `skip` |
-| `--max-file-size` | `25MB` | Per-file cap |
-| `--skip-files` | off | Alias for `--file-strategy=skip` |
-| `--pipelines-paused` | on | Create pipelines paused on target |
-| `--verbose` | off | Per-entity log lines |
-
-## Things to keep in mind
-
-- **Adapter and connector secrets are carried verbatim.** They never appear in logs, but they do travel over the wire to the target — both deployments must be ones you trust.
-- **UUIDs are not preserved.** Every target resource gets a fresh UUID. References between resources are rewritten automatically.
-- **Direct storage-bucket copy isn't supported.** Files always go through the Platform API.
-- **Run from a trusted machine.** Both API keys are loaded as environment variables.
+See the [public docs](https://docs.unstract.com/unstract/unstract_platform/api_documentation/versions/v1-org-migration/) for the full flag list, behavioral notes, and the format of the end-of-run report.

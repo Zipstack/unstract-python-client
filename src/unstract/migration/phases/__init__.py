@@ -12,6 +12,7 @@ from unstract.migration.phases.api_deployment import APIDeploymentPhase
 from unstract.migration.phases.base import Phase
 from unstract.migration.phases.connector import ConnectorPhase
 from unstract.migration.phases.custom_tool import CustomToolPhase
+from unstract.migration.phases.files import FilesPhase
 from unstract.migration.phases.pipeline import PipelinePhase
 from unstract.migration.phases.tag import TagPhase
 from unstract.migration.phases.tool_instance import ToolInstancePhase
@@ -23,6 +24,7 @@ __all__ = [
     "AdapterPhase",
     "ConnectorPhase",
     "CustomToolPhase",
+    "FilesPhase",
     "Phase",
     "PipelinePhase",
     "TagPhase",

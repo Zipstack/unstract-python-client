@@ -28,6 +28,13 @@ class MigrationReport:
     remap_snapshot: dict[str, dict[str, str]] = field(default_factory=dict)
     aborted: bool = False
     abort_reason: str | None = None
+    # Files-phase artifacts. Each entry carries enough context for an
+    # operator to act on it without cross-referencing the run log.
+    uploaded_files: list[dict[str, Any]] = field(default_factory=list)
+    skipped_files: list[dict[str, Any]] = field(default_factory=list)
+    oversize_files: list[dict[str, Any]] = field(default_factory=list)
+    unsupported_files: list[dict[str, Any]] = field(default_factory=list)
+    failed_files: list[dict[str, Any]] = field(default_factory=list)
 
     def get_phase(self, name: str) -> PhaseResult:
         for p in self.phases:
@@ -57,6 +64,7 @@ class MigrationReport:
         console.print(table)
         if self.skipped_phases:
             console.print(f"[dim]Skipped phases:[/dim] {', '.join(self.skipped_phases)}")
+        self._render_files_sections(console)
         if self.remap_snapshot:
             remap = Table(title="Source -> Target UUID Map")
             remap.add_column("Entity")
@@ -80,6 +88,7 @@ class MigrationReport:
             )
         if self.skipped_phases:
             lines.append(f"Skipped phases: {', '.join(self.skipped_phases)}")
+        lines.extend(self._files_sections_plain())
         if self.remap_snapshot:
             lines.append("")
             lines.append("Source -> Target UUID Map")
@@ -108,4 +117,57 @@ class MigrationReport:
             "remap_snapshot": self.remap_snapshot,
             "aborted": self.aborted,
             "abort_reason": self.abort_reason,
+            "uploaded_files": list(self.uploaded_files),
+            "skipped_files": list(self.skipped_files),
+            "oversize_files": list(self.oversize_files),
+            "unsupported_files": list(self.unsupported_files),
+            "failed_files": list(self.failed_files),
         }
+
+    def _render_files_sections(self, console: Any) -> None:
+        if self.uploaded_files:
+            console.print(
+                f"[green]Files uploaded:[/green] {len(self.uploaded_files)}"
+            )
+        for header, rows in (
+            ("Oversize files (manual upload required)", self.oversize_files),
+            ("Unsupported mime files (manual upload required)", self.unsupported_files),
+            ("Skipped files (operator action required)", self.skipped_files),
+            ("Failed files", self.failed_files),
+        ):
+            if not rows:
+                continue
+            console.print(f"[yellow]{header}:[/yellow]")
+            for row in rows:
+                console.print(f"  - {self._describe_file_row(row)}")
+
+    def _files_sections_plain(self) -> list[str]:
+        lines: list[str] = []
+        if self.uploaded_files:
+            lines.append(f"Files uploaded: {len(self.uploaded_files)}")
+        for header, rows in (
+            ("Oversize files (manual upload required)", self.oversize_files),
+            ("Unsupported mime files (manual upload required)", self.unsupported_files),
+            ("Skipped files (operator action required)", self.skipped_files),
+            ("Failed files", self.failed_files),
+        ):
+            if not rows:
+                continue
+            lines.append(f"{header}:")
+            for row in rows:
+                lines.append(f"  - {self._describe_file_row(row)}")
+        return lines
+
+    @staticmethod
+    def _describe_file_row(row: dict[str, Any]) -> str:
+        tool = row.get("tool_name") or row.get("tool_id") or "?"
+        name = row.get("file_name", "?")
+        extras: list[str] = []
+        if "size_bytes" in row:
+            extras.append(f"{row['size_bytes']} bytes")
+        if "mime_type" in row:
+            extras.append(row["mime_type"])
+        if "error" in row:
+            extras.append(f"error={row['error']}")
+        suffix = f" ({', '.join(extras)})" if extras else ""
+        return f"tool={tool} file={name}{suffix}"

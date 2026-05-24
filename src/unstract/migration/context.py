@@ -34,6 +34,9 @@ class OrgEndpoint:
     api_path_prefix: str = "api/v1"
 
 
+DEFAULT_MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB; oversize → manual-upload list
+
+
 @dataclass
 class MigrationOptions:
     """Per-run flags for ``migrate()``."""
@@ -43,6 +46,10 @@ class MigrationOptions:
     exclude: tuple[str, ...] = ()
     on_name_conflict: str = "adopt"  # "adopt" | "abort"
     verbose: bool = False
+    # "platform_api": download/upload via existing endpoints (default).
+    # "skip": metadata only; operator re-uploads via UI on target.
+    file_strategy: str = "platform_api"
+    max_file_size: int = DEFAULT_MAX_FILE_SIZE
 
     def includes(self, phase_name: str) -> bool:
         if self.include is not None and phase_name not in self.include:

@@ -9,14 +9,43 @@ are preferred so the key never lands in shell history.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from typing import Any
 
 import click
 
-from unstract.migration.context import MigrationOptions, OrgEndpoint
+from unstract.migration.context import (
+    DEFAULT_MAX_FILE_SIZE,
+    MigrationOptions,
+    OrgEndpoint,
+)
 from unstract.migration.exceptions import MigrationError
 from unstract.migration.orchestrator import migrate as run_migrate
+
+_SIZE_UNITS: dict[str, int] = {
+    "B": 1,
+    "K": 1024,
+    "KB": 1024,
+    "M": 1024 * 1024,
+    "MB": 1024 * 1024,
+    "G": 1024 * 1024 * 1024,
+    "GB": 1024 * 1024 * 1024,
+}
+_SIZE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([A-Za-z]*)\s*$")
+
+
+def _parse_size(value: str) -> int:
+    """Accept ``25``, ``25MB``, ``1.5GB`` etc. Returns bytes."""
+    m = _SIZE_RE.match(value)
+    if not m:
+        raise click.BadParameter(f"can't parse size '{value}'")
+    num, unit = m.group(1), m.group(2).upper() or "B"
+    if unit not in _SIZE_UNITS:
+        raise click.BadParameter(
+            f"unknown size unit '{unit}'; use one of {sorted(_SIZE_UNITS)}"
+        )
+    return int(float(num) * _SIZE_UNITS[unit])
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -80,6 +109,24 @@ def cli() -> None:
     show_default=True,
     help="Backend URL prefix (matches deployment's PATH_PREFIX env)",
 )
+@click.option(
+    "--file-strategy",
+    type=click.Choice(["platform_api", "skip"]),
+    default="platform_api",
+    show_default=True,
+    help="How to move Prompt Studio document files. 'skip' = metadata only.",
+)
+@click.option(
+    "--max-file-size",
+    default="25MB",
+    show_default=True,
+    help="Per-file cap for the files phase. Oversize → reported, not aborted.",
+)
+@click.option(
+    "--skip-files",
+    is_flag=True,
+    help="Alias for --file-strategy=skip.",
+)
 @click.option("-v", "--verbose", is_flag=True, help="Debug logging")
 def migrate_cmd(
     source_url: str,
@@ -93,10 +140,19 @@ def migrate_cmd(
     exclude: str | None,
     on_name_conflict: str,
     api_prefix: str,
+    file_strategy: str,
+    max_file_size: str,
+    skip_files: bool,
     verbose: bool,
 ) -> None:
     """Migrate configured resources from one org to another."""
     _configure_logging(verbose)
+
+    effective_strategy = "skip" if skip_files else file_strategy
+    try:
+        cap_bytes = _parse_size(max_file_size)
+    except click.BadParameter as e:
+        raise click.UsageError(str(e)) from e
 
     options = MigrationOptions(
         dry_run=dry_run,
@@ -104,6 +160,8 @@ def migrate_cmd(
         exclude=_split_csv(exclude) or (),
         on_name_conflict=on_name_conflict,
         verbose=verbose,
+        file_strategy=effective_strategy,
+        max_file_size=cap_bytes or DEFAULT_MAX_FILE_SIZE,
     )
 
     source = OrgEndpoint(

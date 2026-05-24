@@ -252,6 +252,54 @@ class PlatformClient:
             "POST", f"prompt-studio/{tool_id}/sync-prompts/", json=payload
         )
 
+    def list_prompt_documents(self, tool_id: str) -> list[dict[str, Any]]:
+        """List DocumentManager rows for a tool.
+
+        Used by FilesPhase for target-side idempotency and source-side
+        enumeration. Response items carry ``document_id``,
+        ``document_name``, and ``tool`` (per the serializer's
+        ``to_representation`` filter).
+        """
+        result = self._request(
+            "GET", "prompt-document/", params={"tool_id": tool_id}
+        )
+        return result if isinstance(result, list) else result.get("results", [])
+
+    def download_prompt_file(
+        self, tool_id: str, file_name: str
+    ) -> dict[str, Any]:
+        """GET a Prompt Studio document by tool + filename.
+
+        Returns the backend's ``{"data": ..., "mime_type": ...}`` envelope
+        verbatim. PDFs come back as base64; text/csv as decoded utf-8;
+        Excel returns a placeholder string (not real bytes) — callers must
+        treat unsupported mime types as needing manual re-upload.
+        """
+        return self._request(
+            "GET",
+            f"prompt-studio/file/{tool_id}",
+            params={"file_name": file_name},
+        )
+
+    def upload_prompt_file(
+        self,
+        tool_id: str,
+        file_name: str,
+        data: bytes,
+        mime_type: str,
+    ) -> dict[str, Any]:
+        """Upload a file into a target Prompt Studio tool.
+
+        Backend writes bytes to storage and creates a ``DocumentManager``
+        row. The DM model has ``UniqueConstraint(document_name, tool)``,
+        so callers must pre-check via ``list_prompt_documents`` to avoid
+        an IntegrityError → 500 on re-runs.
+        """
+        files = {"file": (file_name, data, mime_type)}
+        return self._request(
+            "POST", f"prompt-studio/file/{tool_id}/", files=files
+        )
+
     def export_custom_tool(self, tool_id: str, *, force: bool = True) -> Any:
         """Republish ``PromptStudioRegistry`` from the tool's current state.
 

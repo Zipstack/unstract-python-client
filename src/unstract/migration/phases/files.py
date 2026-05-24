@@ -114,7 +114,8 @@ class FilesPhase(Phase):
 
         for doc in src_docs:
             file_name = doc.get("document_name")
-            if not file_name:
+            src_document_id = doc.get("document_id")
+            if not file_name or not src_document_id:
                 continue
             if file_name in target_names:
                 result.skipped += 1
@@ -131,7 +132,18 @@ class FilesPhase(Phase):
                 )
                 continue
             self._migrate_one_file(
-                src_tool_id, tgt_tool_id, tool_name, file_name, report, result
+                src_tool_id,
+                tgt_tool_id,
+                tool_name,
+                file_name,
+                src_document_id,
+                report,
+                result,
+            )
+
+        if not self.ctx.options.dry_run:
+            self._ensure_default_doc(
+                src_tool_id, tgt_tool_id, tool_name, src_docs
             )
 
     def _migrate_one_file(
@@ -140,12 +152,15 @@ class FilesPhase(Phase):
         tgt_tool_id: str,
         tool_name: str,
         file_name: str,
+        src_document_id: str,
         report: MigrationReport,
         result: PhaseResult,
     ) -> None:
         try:
             payload = self._with_retry(
-                lambda: self.ctx.source.download_prompt_file(src_tool_id, file_name),
+                lambda: self.ctx.source.download_prompt_file(
+                    src_tool_id, src_document_id
+                ),
                 op=f"download {tool_name}/{file_name}",
             )
         except Exception as e:
@@ -283,6 +298,101 @@ class FilesPhase(Phase):
         # Excel + unhandled types: BE returned a placeholder string,
         # not real bytes. Round-trip would corrupt the file.
         return None
+
+    def _ensure_default_doc(
+        self,
+        src_tool_id: str,
+        tgt_tool_id: str,
+        tool_name: str,
+        src_docs: list[dict[str, Any]],
+    ) -> None:
+        """Set target ``CustomTool.output`` so the FE auto-selects a doc.
+
+        Mirror source's chosen doc by filename when possible; fall back
+        to the first available target doc. Skip if target already has
+        ``output`` set — never override an operator's later choice on
+        re-runs.
+        """
+        try:
+            tgt_tool = self.ctx.target.get_custom_tool(tgt_tool_id)
+        except Exception as e:
+            logger.warning(
+                "files: skipping default-doc set for tool=%s — fetch tgt failed: %s",
+                tool_name, e,
+            )
+            return
+
+        if tgt_tool.get("output"):
+            logger.debug(
+                "files: target tool=%s already has default doc; leaving as-is",
+                tool_name,
+            )
+            return
+
+        try:
+            tgt_docs = self.ctx.target.list_prompt_documents(tgt_tool_id)
+        except Exception as e:
+            logger.warning(
+                "files: skipping default-doc set for tool=%s — list tgt docs failed: %s",
+                tool_name, e,
+            )
+            return
+        if not tgt_docs:
+            return
+
+        chosen_id = self._pick_default_doc_id(
+            src_tool_id, src_docs, tgt_docs, tool_name
+        )
+        if not chosen_id:
+            return
+
+        try:
+            self.ctx.target.update_custom_tool(tgt_tool_id, {"output": chosen_id})
+            logger.info(
+                "files: set default doc tool=%s doc_id=%s", tool_name, chosen_id
+            )
+        except Exception as e:
+            logger.warning(
+                "files: PATCH default doc failed tool=%s: %s", tool_name, e
+            )
+
+    def _pick_default_doc_id(
+        self,
+        src_tool_id: str,
+        src_docs: list[dict[str, Any]],
+        tgt_docs: list[dict[str, Any]],
+        tool_name: str,
+    ) -> str | None:
+        # Try mirroring the source's selection by filename. If source
+        # GET fails or source has no chosen doc, fall back to the first
+        # target doc so the FE doesn't render an empty selector.
+        try:
+            src_tool = self.ctx.source.get_custom_tool(src_tool_id)
+            src_output = src_tool.get("output")
+        except Exception as e:
+            logger.debug(
+                "files: source CustomTool fetch failed for tool=%s (%s); "
+                "falling back to first target doc",
+                tool_name, e,
+            )
+            src_output = None
+
+        if src_output:
+            src_name = next(
+                (d.get("document_name") for d in src_docs
+                 if d.get("document_id") == src_output),
+                None,
+            )
+            if src_name:
+                matched = next(
+                    (d.get("document_id") for d in tgt_docs
+                     if d.get("document_name") == src_name),
+                    None,
+                )
+                if matched:
+                    return matched
+
+        return tgt_docs[0].get("document_id")
 
     def _lookup_tool_name(self, tgt_tool_id: str) -> str | None:
         # CustomToolPhase doesn't record names; fetch lazily for log clarity.

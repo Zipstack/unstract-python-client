@@ -169,6 +169,22 @@ class PlatformClient:
         result = self._request("GET", "prompt-studio/")
         return result if isinstance(result, list) else result.get("results", [])
 
+    def get_custom_tool(self, tool_id: str) -> dict[str, Any]:
+        """Fetch a single prompt-studio project (full serializer).
+
+        Returns ``fields = "__all__"`` per ``CustomToolSerializer`` —
+        notably includes ``output`` (the default DocumentManager id the
+        FE binds to ``selectedDoc`` on load).
+        """
+        return self._request("GET", f"prompt-studio/{tool_id}/")
+
+    def update_custom_tool(
+        self, tool_id: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """PATCH a prompt-studio project. Used to set ``output`` (the
+        default doc id) after the files phase populates DM rows."""
+        return self._request("PATCH", f"prompt-studio/{tool_id}/", json=body)
+
     def list_profiles(self, tool_id: str) -> list[dict[str, Any]]:
         """List ProfileManager rows for a tool.
 
@@ -261,24 +277,25 @@ class PlatformClient:
         ``to_representation`` filter).
         """
         result = self._request(
-            "GET", "prompt-document/", params={"tool_id": tool_id}
+            "GET", "prompt-studio/prompt-document/", params={"tool_id": tool_id}
         )
         return result if isinstance(result, list) else result.get("results", [])
 
     def download_prompt_file(
-        self, tool_id: str, file_name: str
+        self, tool_id: str, document_id: str
     ) -> dict[str, Any]:
-        """GET a Prompt Studio document by tool + filename.
+        """GET a Prompt Studio document by tool + DM row id.
 
-        Returns the backend's ``{"data": ..., "mime_type": ...}`` envelope
-        verbatim. PDFs come back as base64; text/csv as decoded utf-8;
-        Excel returns a placeholder string (not real bytes) — callers must
-        treat unsupported mime types as needing manual re-upload.
+        ``fetch_contents_ide`` resolves the filename internally from the
+        DocumentManager row, so the SDK passes the ``document_id`` it
+        already has from ``list_prompt_documents`` rather than reposting
+        the filename. Returns ``{"data": ..., "mime_type": ...}`` —
+        PDFs base64, text/csv utf-8, Excel placeholder.
         """
         return self._request(
             "GET",
             f"prompt-studio/file/{tool_id}",
-            params={"file_name": file_name},
+            params={"document_id": document_id},
         )
 
     def upload_prompt_file(
@@ -297,7 +314,7 @@ class PlatformClient:
         """
         files = {"file": (file_name, data, mime_type)}
         return self._request(
-            "POST", f"prompt-studio/file/{tool_id}/", files=files
+            "POST", f"prompt-studio/file/{tool_id}", files=files
         )
 
     def export_custom_tool(self, tool_id: str, *, force: bool = True) -> Any:

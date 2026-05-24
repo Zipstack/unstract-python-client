@@ -72,7 +72,17 @@ class FakeClient:
             raise self.list_errors[tool_id]
         return [dict(d) for d in self._documents.get(tool_id, [])]
 
-    def download_prompt_file(self, tool_id: str, file_name: str) -> dict:
+    def download_prompt_file(self, tool_id: str, document_id: str) -> dict:
+        # Tests key payloads + error queues by (tool_id, file_name) for
+        # readability; resolve the filename from the documents list.
+        file_name = next(
+            (
+                d["document_name"]
+                for d in self._documents.get(tool_id, [])
+                if d.get("document_id") == document_id
+            ),
+            document_id,
+        )
         self.download_calls.append((tool_id, file_name))
         queue = self.download_errors.get((tool_id, file_name))
         if queue:
@@ -102,6 +112,16 @@ class FakeClient:
 
     def list_custom_tools(self) -> list[dict]:
         return list(self._tools)
+
+    def get_custom_tool(self, tool_id: str) -> dict:
+        return dict(next((t for t in self._tools if t.get("tool_id") == tool_id), {}))
+
+    def update_custom_tool(self, tool_id: str, body: dict) -> dict:
+        for t in self._tools:
+            if t.get("tool_id") == tool_id:
+                t.update(body)
+                return dict(t)
+        return {}
 
 
 def _ctx(src: FakeClient, tgt: FakeClient, *, remap: RemapTable | None = None,
@@ -389,3 +409,76 @@ def test_text_mimes_round_trip_as_utf8(mime, raw):
     upload = tgt.uploaded[0]
     assert upload["data"] == raw.encode("utf-8")
     assert upload["mime_type"] == mime
+
+
+def test_default_doc_mirrors_source_selection_by_filename():
+    src = FakeClient(
+        endpoint=SRC_ENDPOINT,
+        documents={"src-1": [_doc("a.pdf"), _doc("b.pdf")]},
+        file_payloads={
+            ("src-1", "a.pdf"): _pdf_payload(b"A"),
+            ("src-1", "b.pdf"): _pdf_payload(b"B"),
+        },
+        # Source's selected doc is b.pdf (document_id="src-b.pdf").
+        tools=[{"tool_id": "src-1", "tool_name": "demo", "output": "src-b.pdf"}],
+    )
+    tgt = FakeClient(
+        endpoint=TGT_ENDPOINT, tools=[{"tool_id": "tgt-1", "tool_name": "demo"}]
+    )
+    remap = RemapTable()
+    remap.record("custom_tool", "src-1", "tgt-1")
+    ctx = _ctx(src, tgt, remap=remap)
+
+    FilesPhase(ctx).run(MigrationReport())
+
+    # Target's CustomTool.output now points at b.pdf's new target doc id.
+    tgt_tool = next(t for t in tgt._tools if t["tool_id"] == "tgt-1")
+    output_id = tgt_tool["output"]
+    b_upload = next(d for d in tgt._documents["tgt-1"] if d["document_name"] == "b.pdf")
+    assert output_id == b_upload["document_id"]
+
+
+def test_default_doc_falls_back_to_first_when_source_has_none():
+    src = FakeClient(
+        endpoint=SRC_ENDPOINT,
+        documents={"src-1": [_doc("a.pdf")]},
+        file_payloads={("src-1", "a.pdf"): _pdf_payload(b"A")},
+        # Source has no output set.
+        tools=[{"tool_id": "src-1", "tool_name": "demo"}],
+    )
+    tgt = FakeClient(
+        endpoint=TGT_ENDPOINT, tools=[{"tool_id": "tgt-1", "tool_name": "demo"}]
+    )
+    remap = RemapTable()
+    remap.record("custom_tool", "src-1", "tgt-1")
+    ctx = _ctx(src, tgt, remap=remap)
+
+    FilesPhase(ctx).run(MigrationReport())
+
+    tgt_tool = next(t for t in tgt._tools if t["tool_id"] == "tgt-1")
+    a_upload = next(d for d in tgt._documents["tgt-1"] if d["document_name"] == "a.pdf")
+    assert tgt_tool["output"] == a_upload["document_id"]
+
+
+def test_default_doc_preserves_existing_target_choice():
+    src = FakeClient(
+        endpoint=SRC_ENDPOINT,
+        documents={"src-1": [_doc("a.pdf")]},
+        file_payloads={("src-1", "a.pdf"): _pdf_payload(b"A")},
+        tools=[{"tool_id": "src-1", "tool_name": "demo", "output": "src-a.pdf"}],
+    )
+    # Operator already picked a doc on target — re-run must not clobber.
+    tgt = FakeClient(
+        endpoint=TGT_ENDPOINT,
+        tools=[
+            {"tool_id": "tgt-1", "tool_name": "demo", "output": "operator-pick"}
+        ],
+    )
+    remap = RemapTable()
+    remap.record("custom_tool", "src-1", "tgt-1")
+    ctx = _ctx(src, tgt, remap=remap)
+
+    FilesPhase(ctx).run(MigrationReport())
+
+    tgt_tool = next(t for t in tgt._tools if t["tool_id"] == "tgt-1")
+    assert tgt_tool["output"] == "operator-pick"

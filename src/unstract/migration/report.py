@@ -7,8 +7,11 @@ available; falls back to plain text otherwise.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -65,15 +68,7 @@ class MigrationReport:
         if self.skipped_phases:
             console.print(f"[dim]Skipped phases:[/dim] {', '.join(self.skipped_phases)}")
         self._render_files_sections(console)
-        if self.remap_snapshot:
-            remap = Table(title="Source -> Target UUID Map")
-            remap.add_column("Entity")
-            remap.add_column("Source UUID")
-            remap.add_column("Target UUID")
-            for entity, mapping in self.remap_snapshot.items():
-                for src, tgt in mapping.items():
-                    remap.add_row(entity, src, tgt)
-            console.print(remap)
+        self._render_remap_summary(console_print=console.print)
         if self.aborted:
             console.print(f"[red]ABORTED:[/red] {self.abort_reason}")
         return buf.getvalue()
@@ -89,13 +84,7 @@ class MigrationReport:
         if self.skipped_phases:
             lines.append(f"Skipped phases: {', '.join(self.skipped_phases)}")
         lines.extend(self._files_sections_plain())
-        if self.remap_snapshot:
-            lines.append("")
-            lines.append("Source -> Target UUID Map")
-            lines.append("-" * 60)
-            for entity, mapping in self.remap_snapshot.items():
-                for src, tgt in mapping.items():
-                    lines.append(f"  {entity:<12} {src} -> {tgt}")
+        self._render_remap_summary(console_print=lines.append)
         if self.aborted:
             lines.append(f"ABORTED: {self.abort_reason}")
         return "\n".join(lines)
@@ -123,6 +112,25 @@ class MigrationReport:
             "unsupported_files": list(self.unsupported_files),
             "failed_files": list(self.failed_files),
         }
+
+    def _render_remap_summary(self, console_print: Any) -> None:
+        """Summarise the remap snapshot. Full map is large and noisy, so
+        we only print per-entity counts here; the full mapping is emitted
+        at DEBUG and remains in ``as_dict()`` for programmatic consumers.
+        """
+        if not self.remap_snapshot:
+            return
+        counts = ", ".join(
+            f"{entity}={len(mapping)}"
+            for entity, mapping in self.remap_snapshot.items()
+            if mapping
+        )
+        if counts:
+            console_print(f"Remap entries: {counts}")
+        if logger.isEnabledFor(logging.DEBUG):
+            for entity, mapping in self.remap_snapshot.items():
+                for src, tgt in mapping.items():
+                    logger.debug("remap %s %s -> %s", entity, src, tgt)
 
     def _render_files_sections(self, console: Any) -> None:
         if self.uploaded_files:

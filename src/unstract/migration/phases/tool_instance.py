@@ -27,6 +27,28 @@ from unstract.migration.report import MigrationReport, PhaseResult
 
 logger = logging.getLogger(__name__)
 
+# Source backend's ToolInstanceSerializer.to_representation emits these
+# sentinel strings when an adapter UUID/name in the stored metadata can
+# no longer be resolved (deleted or renamed on source). Round-tripping
+# them to target produces an AdapterNotFound on PATCH, so we detect and
+# skip the metadata PATCH instead — the ToolInstance row exists with the
+# backend's safe defaults and the operator can re-bind in the UI.
+_BROKEN_ADAPTER_SENTINELS: tuple[str, ...] = (
+    "NOT FOUND",
+    "[DELETED ADAPTER",
+    "[NEEDS UPDATE]",
+)
+
+
+def _broken_adapter_keys(metadata: dict[str, Any]) -> list[str]:
+    broken: list[str] = []
+    for key, value in metadata.items():
+        if isinstance(value, str) and any(
+            s in value for s in _BROKEN_ADAPTER_SENTINELS
+        ):
+            broken.append(f"{key}={value!r}")
+    return broken
+
 
 class ToolInstancePhase(Phase):
     name = "tool_instance"
@@ -120,14 +142,28 @@ class ToolInstancePhase(Phase):
         # PATCH the metadata regardless of created/adopted — keeps tool config
         # aligned with source on every run.
         src_metadata = src_ti.get("metadata") or {}
-        try:
-            self.ctx.target.update_tool_instance_metadata(tgt_ti["id"], src_metadata)
-        except Exception as e:
-            logger.exception(
-                "Failed to PATCH tool_instance %s metadata: %s", tgt_ti["id"], e
+        broken = _broken_adapter_keys(src_metadata)
+        if broken:
+            logger.warning(
+                "skipping metadata PATCH for tool_instance src=%s tgt=%s — "
+                "source metadata carries broken adapter refs %s; "
+                "row exists with backend defaults, re-bind in UI",
+                src_ti_id, tgt_ti["id"], broken,
             )
-            result.failed += 1
-            result.errors.append(f"patch metadata {tgt_ti['id']}: {e}")
-            return
+            result.errors.append(
+                f"stale adapter refs on src tool_instance {src_ti_id}: {broken}"
+            )
+        else:
+            try:
+                self.ctx.target.update_tool_instance_metadata(
+                    tgt_ti["id"], src_metadata
+                )
+            except Exception as e:
+                logger.exception(
+                    "Failed to PATCH tool_instance %s metadata: %s", tgt_ti["id"], e
+                )
+                result.failed += 1
+                result.errors.append(f"patch metadata {tgt_ti['id']}: {e}")
+                return
 
         self.ctx.remap.record("tool_instance", src_ti_id, tgt_ti["id"])

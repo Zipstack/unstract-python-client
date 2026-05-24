@@ -45,14 +45,14 @@ _PROFILE_ADAPTER_FIELDS: tuple[tuple[str, str], ...] = (
 
 
 def _extract_adapter_name(value: Any) -> str | None:
-    """ProfileManagerSerializer.to_representation renders adapter FKs as
-    flat strings holding the adapter NAME (not the UUID). Tolerate the
-    nested-dict shape too in case serializer behavior diverges.
+    """Adapter FKs serialise as the adapter NAME on the wire; tolerate a
+    nested-dict shape too. Never fall back to the UUID — list_adapters
+    matches by name and would silently miss.
     """
     if isinstance(value, str):
         return value or None
     if isinstance(value, dict):
-        return value.get("adapter_name") or value.get("name") or value.get("id")
+        return value.get("adapter_name") or value.get("name")
     return None
 
 
@@ -70,11 +70,27 @@ class CustomToolPhase(Phase):
             return result
 
         logger.info("Found %d custom tool(s) in source org", len(src_tools))
+        # Fetch the target list once — name-based adoption lookup is
+        # done per source tool, but the underlying list is invariant
+        # across the loop barring our own creates (which we splice into
+        # ``target_tools`` after each create so re-runs stay idempotent).
+        try:
+            target_tools = self.ctx.target.list_custom_tools()
+        except Exception as e:
+            logger.exception("Failed to list target tools: %s", e)
+            result.failed += 1
+            result.errors.append(f"list target tools: {e}")
+            return
         for summary in src_tools:
-            self._migrate_one(summary, result)
+            self._migrate_one(summary, target_tools, result)
         return result
 
-    def _migrate_one(self, summary: dict[str, Any], result: PhaseResult) -> None:
+    def _migrate_one(
+        self,
+        summary: dict[str, Any],
+        target_tools: list[dict[str, Any]],
+        result: PhaseResult,
+    ) -> None:
         tool_name = summary["tool_name"]
         src_tool_id = summary["tool_id"]
 
@@ -86,13 +102,6 @@ class CustomToolPhase(Phase):
             result.errors.append(f"export src tool {tool_name}: {e}")
             return
 
-        try:
-            target_tools = self.ctx.target.list_custom_tools()
-        except Exception as e:
-            logger.exception("Failed to list target tools: %s", e)
-            result.failed += 1
-            result.errors.append(f"list target tools: {e}")
-            return
         match = next(
             (t for t in target_tools if t["tool_name"] == tool_name), None
         )
@@ -103,6 +112,13 @@ class CustomToolPhase(Phase):
             tgt_tool_id = self._create_fresh(
                 export_data, src_tool_id, tool_name, result
             )
+            # Keep the local cache in sync so a downstream source tool
+            # with the same name (uncommon but legal) adopts this new
+            # row instead of trying to re-create it.
+            if tgt_tool_id is not None:
+                target_tools.append(
+                    {"tool_id": tgt_tool_id, "tool_name": tool_name}
+                )
 
         if tgt_tool_id is None:
             return

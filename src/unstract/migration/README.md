@@ -2,6 +2,8 @@
 
 Move an Unstract organization's resources from one deployment to another over the Platform API.
 
+Source and target can be the same instance (org-to-org on one deployment) or two different instances (one URL to another). The only requirement is that both expose the Platform API and you hold an admin key on each.
+
 What gets carried over: adapters, connectors, custom tools, prompts, profiles, workflows, tool instances, workflow endpoints, tags, API deployments, pipelines, and Prompt Studio document files.
 
 ## Quickstart
@@ -74,13 +76,40 @@ The Prompt Studio document corpus is the only thing with actual bytes on disk. D
 
 ## What you'll see in the report
 
-`MigrationReport` prints at the end with:
+At the end of every run, a `MigrationReport` is printed. Per-phase counts up top, then any files that need follow-up, then a remap summary, then a status footer.
 
-- Per-phase counts: `created`, `adopted` (already existed), `failed`
-- `oversize_files` — files skipped because they exceeded the cap
-- `skipped_files` — files not transferred under `--file-strategy=skip`
-- `failed_files` — files the upload itself failed on
-- A source-to-target UUID map for every migrated resource
+Counts per phase: `Created` (new on target), `Adopted` (already existed, reused), `Skipped`, `Failed`.
+
+```
+                          Migration Report
+┏━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━┓
+┃ Phase                ┃ Created ┃ Adopted ┃ Skipped ┃ Failed ┃
+┡━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━┩
+│ adapter              │       6 │       2 │       0 │      0 │
+│ connector            │       3 │       0 │       0 │      0 │
+│ tag                  │       4 │       0 │       0 │      0 │
+│ custom_tool          │      12 │       1 │       0 │      0 │
+│ files                │      87 │       0 │       3 │      1 │
+│ workflow             │       5 │       0 │       0 │      0 │
+│ tool_instance        │       5 │       0 │       0 │      0 │
+│ workflow_endpoint    │      10 │       0 │       0 │      0 │
+│ api_deployment       │       2 │       0 │       0 │      0 │
+│ pipeline             │       1 │       0 │       0 │      0 │
+├──────────────────────┼─────────┼─────────┼─────────┼────────┤
+│ TOTAL                │     135 │       3 │       3 │      1 │
+└──────────────────────┴─────────┴─────────┴─────────┴────────┘
+Files uploaded: 87
+Oversize files (manual upload required):
+  - tool=invoice-extractor file=scan-2023-archive.pdf size=41.2MB cap=25.0MB
+Failed files:
+  - tool=contracts file=draft.docx error=upload timed out
+Remap entries: adapter=8, connector=3, tag=4, custom_tool=13, workflow=5, ...
+Completed with 1 failure(s) — see WARNING/ERROR log lines above for details
+```
+
+A clean run ends with `Completed successfully`. A run aborted by `--on-name-conflict=abort` ends with `ABORTED: <reason>`.
+
+The same data is available programmatically via `report.as_dict()` — useful if you're wrapping the command in your own automation.
 
 ## CLI reference
 

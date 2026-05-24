@@ -39,7 +39,15 @@ def build_post_payload(
     and rejects on required fields).
     """
     keys = writable - SERVER_MANAGED
-    return {k: src[k] for k in keys if k in src and src[k] not in (None, "")}
+    # Equality with `(None, "")` matched False and 0 too (Python: False == 0,
+    # 0 in (None, "") is False, but `0 not in (...)` falsely returns True).
+    # Explicit identity / equality checks preserve falsy-but-meaningful
+    # values like ``BooleanField`` False and numeric defaults.
+    return {
+        k: src[k]
+        for k in keys
+        if k in src and src[k] is not None and src[k] != ""
+    }
 
 
 class Phase(ABC):

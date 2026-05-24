@@ -155,7 +155,11 @@ def test_endpoint_without_source_connector_patches_with_null():
     assert payload["configuration"] == {"foo": "bar"}
 
 
-def test_unknown_connector_uuid_logs_but_does_not_fail():
+def test_unknown_connector_uuid_skips_endpoint_and_flags_error():
+    """Source had a connector but its remap is missing — patching with
+    connector=None would silently detach the endpoint on target. Skip
+    the PATCH and record an operator-visible error entry instead.
+    """
     src = FakeClient()
     src.endpoints[SRC_WF] = [
         _src_endpoint(
@@ -171,10 +175,10 @@ def test_unknown_connector_uuid_logs_but_does_not_fail():
 
     result = WorkflowEndpointPhase(ctx).run(MigrationReport())
 
-    assert result.created == 1
-    # No remap → connector_instance_id stays None instead of failing the PATCH.
-    _, payload = tgt.patch_calls[0]
-    assert payload["connector_instance_id"] is None
+    assert result.created == 0
+    assert result.skipped == 1
+    assert tgt.patch_calls == []
+    assert any("unmapped connector" in e for e in result.errors)
 
 
 def test_missing_target_endpoint_fails_loudly():

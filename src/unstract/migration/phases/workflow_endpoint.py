@@ -120,10 +120,21 @@ class WorkflowEndpointPhase(Phase):
         if src_conn_id:
             tgt_conn_id = self.ctx.remap.resolve("connector", src_conn_id)
             if not tgt_conn_id:
+                # Source had a connector but it never made it through the
+                # connector phase (e.g. redacted secrets, skipped row).
+                # Patching the endpoint with connector=None would silently
+                # detach it on target; skip + flag so the operator notices.
                 logger.warning(
-                    "no connector remap for %s on %s endpoint %s — leaving unset",
-                    src_conn_id, etype, src_ep_id,
+                    "skipping %s endpoint src=%s tgt=%s — source connector %s "
+                    "has no target remap; would silently unset connector",
+                    etype, src_ep_id, tgt_ep_id, src_conn_id,
                 )
+                result.skipped += 1
+                result.errors.append(
+                    f"unmapped connector on {etype} endpoint {src_ep_id}: "
+                    f"src_connector={src_conn_id}"
+                )
+                return
 
         payload: dict[str, Any] = {
             "connection_type": src_ep.get("connection_type") or "",

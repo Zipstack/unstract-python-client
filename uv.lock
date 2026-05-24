@@ -804,7 +804,7 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-migration = [
+clone = [
     { name = "click" },
     { name = "rich" },
 ]
@@ -841,12 +841,12 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "click", marker = "extra == 'migration'", specifier = ">=8.1" },
+    { name = "click", marker = "extra == 'clone'", specifier = ">=8.1" },
     { name = "requests", specifier = ">=2.32.3" },
-    { name = "rich", marker = "extra == 'migration'", specifier = ">=13.7" },
+    { name = "rich", marker = "extra == 'clone'", specifier = ">=13.7" },
     { name = "tenacity", specifier = ">=8.2.0" },
 ]
-provides-extras = ["migration"]
+provides-extras = ["clone"]
 
 [package.metadata.requires-dev]
 dev = [

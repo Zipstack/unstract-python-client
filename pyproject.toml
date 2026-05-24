@@ -26,13 +26,13 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-migration = [
+clone = [
     "click>=8.1",
     "rich>=13.7",
 ]
 
 [project.scripts]
-unstract-migrate = "unstract.migration.cli:main"
+unstract-clone = "unstract.clone.cli:main"
 
 [build-system]
 requires = ["hatchling"]

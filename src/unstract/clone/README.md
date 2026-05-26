@@ -12,7 +12,7 @@ Clone an Unstract organization's configured resources into another organization 
 Cloned resources: adapters, connectors, custom tools, prompts, profiles, workflows, tool instances, workflow endpoints, tags, API deployments, pipelines, and Prompt Studio document files. The source org is left untouched.
 
 > **Full documentation, behavior notes, CLI reference, and sample report:**
-> https://docs.unstract.com/unstract/unstract_platform/api_documentation/versions/v1-org-cloning/
+> https://docs.unstract.com/unstract/unstract_platform/api_documentation/versions/cloning-orgs/
 
 ## Install
 
@@ -52,4 +52,4 @@ The Prompt Studio document corpus is the only resource type with bytes on disk. 
 > [!WARNING]
 > Run clones during low-activity windows. Concurrent uploads to the source org during a clone can create duplicate file records on the target.
 
-See the [public docs](https://docs.unstract.com/unstract/unstract_platform/api_documentation/versions/v1-org-cloning/) for the full flag list, behavioral notes, and the format of the end-of-run report.
+See the [public docs](https://docs.unstract.com/unstract/unstract_platform/api_documentation/versions/cloning-orgs/) for the full flag list, behavioral notes, and the format of the end-of-run report.

@@ -29,7 +29,6 @@ from unstract.clone.exceptions import PlatformAPIError
 from unstract.clone.phases.files import FilesPhase
 from unstract.clone.report import CloneReport
 
-
 SRC_ENDPOINT = OrgEndpoint(
     base_url="http://src", organization_id="src-org", platform_key="src-key"
 )
@@ -53,9 +52,7 @@ class FakeClient:
             k: list(v) for k, v in (documents or {}).items()
         }
         # (tool_id, file_name) -> {"data": ..., "mime_type": ...}
-        self._file_payloads: dict[tuple[str, str], dict] = dict(
-            file_payloads or {}
-        )
+        self._file_payloads: dict[tuple[str, str], dict] = dict(file_payloads or {})
         self._tools = list(tools or [])
         self.uploaded: list[dict[str, Any]] = []
         self.list_calls: list[str] = []
@@ -124,8 +121,9 @@ class FakeClient:
         return {}
 
 
-def _ctx(src: FakeClient, tgt: FakeClient, *, remap: RemapTable | None = None,
-         **opts) -> CloneContext:
+def _ctx(
+    src: FakeClient, tgt: FakeClient, *, remap: RemapTable | None = None, **opts
+) -> CloneContext:
     remap = remap or RemapTable()
     return CloneContext(
         source=src,
@@ -156,7 +154,9 @@ def test_happy_path_uploads_pdf_and_text():
             ("src-1", "notes.txt"): _text_payload("hello world"),
         },
     )
-    tgt = FakeClient(endpoint=TGT_ENDPOINT, tools=[{"tool_id": "tgt-1", "tool_name": "demo"}])
+    tgt = FakeClient(
+        endpoint=TGT_ENDPOINT, tools=[{"tool_id": "tgt-1", "tool_name": "demo"}]
+    )
     remap = RemapTable()
     remap.record("custom_tool", "src-1", "tgt-1")
     ctx = _ctx(src, tgt, remap=remap)
@@ -210,7 +210,9 @@ def test_oversize_file_is_recorded_and_siblings_continue():
             ("src-1", "small.txt"): _text_payload("ok"),
         },
     )
-    tgt = FakeClient(endpoint=TGT_ENDPOINT, tools=[{"tool_id": "tgt-1", "tool_name": "demo"}])
+    tgt = FakeClient(
+        endpoint=TGT_ENDPOINT, tools=[{"tool_id": "tgt-1", "tool_name": "demo"}]
+    )
     remap = RemapTable()
     remap.record("custom_tool", "src-1", "tgt-1")
     ctx = _ctx(src, tgt, remap=remap, max_file_size=10)
@@ -219,6 +221,10 @@ def test_oversize_file_is_recorded_and_siblings_continue():
     result = FilesPhase(ctx).run(report)
 
     assert result.created == 1
+    # Oversize must bump skipped so the operator sees it surfaced in the
+    # phase counters, not only in the report's list.
+    assert result.skipped == 1
+    assert result.failed == 0
     assert {u["file_name"] for u in tgt.uploaded} == {"small.txt"}
     assert len(report.oversize_files) == 1
     over = report.oversize_files[0]
@@ -238,7 +244,9 @@ def test_unsupported_mime_is_recorded_not_uploaded():
             }
         },
     )
-    tgt = FakeClient(endpoint=TGT_ENDPOINT, tools=[{"tool_id": "tgt-1", "tool_name": "demo"}])
+    tgt = FakeClient(
+        endpoint=TGT_ENDPOINT, tools=[{"tool_id": "tgt-1", "tool_name": "demo"}]
+    )
     remap = RemapTable()
     remap.record("custom_tool", "src-1", "tgt-1")
     ctx = _ctx(src, tgt, remap=remap)
@@ -247,11 +255,38 @@ def test_unsupported_mime_is_recorded_not_uploaded():
     result = FilesPhase(ctx).run(report)
 
     assert result.created == 0
+    # Unsupported mimes must bump skipped so the run doesn't report green
+    # while leaving files unmoved.
+    assert result.skipped == 1
+    assert result.failed == 0
     assert tgt.uploaded == []
     assert len(report.unsupported_files) == 1
     entry = report.unsupported_files[0]
     assert entry["file_name"] == "sheet.xlsx"
     assert entry["mime_type"].startswith("application/vnd.openxmlformats")
+
+
+def test_malformed_source_dm_row_bumps_skipped_with_error():
+    # Renamed-field or partial-serializer response: row lacks
+    # document_name/document_id. Must surface, not silently disappear.
+    src = FakeClient(
+        endpoint=SRC_ENDPOINT,
+        documents={"src-1": [{"tool": "src-1"}, _doc("ok.pdf")]},
+        file_payloads={("src-1", "ok.pdf"): _pdf_payload(b"BYTES")},
+    )
+    tgt = FakeClient(
+        endpoint=TGT_ENDPOINT, tools=[{"tool_id": "tgt-1", "tool_name": "demo"}]
+    )
+    remap = RemapTable()
+    remap.record("custom_tool", "src-1", "tgt-1")
+    ctx = _ctx(src, tgt, remap=remap)
+    report = CloneReport()
+
+    result = FilesPhase(ctx).run(report)
+
+    assert result.created == 1  # the well-formed sibling still uploads.
+    assert result.skipped == 1  # the malformed row.
+    assert any("malformed source DM row" in e for e in result.errors)
 
 
 def test_skip_strategy_emits_skipped_files_no_traffic():
@@ -282,7 +317,9 @@ def test_dry_run_makes_no_writes_even_for_missing_files():
         documents={"src-1": [_doc("a.pdf")]},
         file_payloads={("src-1", "a.pdf"): _pdf_payload(b"X")},
     )
-    tgt = FakeClient(endpoint=TGT_ENDPOINT, tools=[{"tool_id": "tgt-1", "tool_name": "demo"}])
+    tgt = FakeClient(
+        endpoint=TGT_ENDPOINT, tools=[{"tool_id": "tgt-1", "tool_name": "demo"}]
+    )
     remap = RemapTable()
     remap.record("custom_tool", "src-1", "tgt-1")
     ctx = _ctx(src, tgt, remap=remap, dry_run=True)
@@ -305,7 +342,9 @@ def test_transient_503_is_retried_then_succeeds(monkeypatch):
     src.download_errors[("src-1", "a.pdf")] = [
         PlatformAPIError("flaky", status_code=503, body="")
     ]
-    tgt = FakeClient(endpoint=TGT_ENDPOINT, tools=[{"tool_id": "tgt-1", "tool_name": "demo"}])
+    tgt = FakeClient(
+        endpoint=TGT_ENDPOINT, tools=[{"tool_id": "tgt-1", "tool_name": "demo"}]
+    )
     remap = RemapTable()
     remap.record("custom_tool", "src-1", "tgt-1")
     ctx = _ctx(src, tgt, remap=remap)
@@ -365,7 +404,9 @@ def test_upload_failure_records_failed_files_entry():
         documents={"src-1": [_doc("a.pdf")]},
         file_payloads={("src-1", "a.pdf"): _pdf_payload(b"X")},
     )
-    tgt = FakeClient(endpoint=TGT_ENDPOINT, tools=[{"tool_id": "tgt-1", "tool_name": "demo"}])
+    tgt = FakeClient(
+        endpoint=TGT_ENDPOINT, tools=[{"tool_id": "tgt-1", "tool_name": "demo"}]
+    )
     tgt.upload_errors[("tgt-1", "a.pdf")] = [
         PlatformAPIError("bad", status_code=400, body="bad")
     ]
@@ -397,7 +438,9 @@ def test_text_mimes_round_trip_as_utf8(mime, raw):
         documents={"src-1": [_doc("data")]},
         file_payloads={("src-1", "data"): _text_payload(raw, mime=mime)},
     )
-    tgt = FakeClient(endpoint=TGT_ENDPOINT, tools=[{"tool_id": "tgt-1", "tool_name": "demo"}])
+    tgt = FakeClient(
+        endpoint=TGT_ENDPOINT, tools=[{"tool_id": "tgt-1", "tool_name": "demo"}]
+    )
     remap = RemapTable()
     remap.record("custom_tool", "src-1", "tgt-1")
     ctx = _ctx(src, tgt, remap=remap)
@@ -470,9 +513,7 @@ def test_default_doc_preserves_existing_target_choice():
     # Operator already picked a doc on target — re-run must not clobber.
     tgt = FakeClient(
         endpoint=TGT_ENDPOINT,
-        tools=[
-            {"tool_id": "tgt-1", "tool_name": "demo", "output": "operator-pick"}
-        ],
+        tools=[{"tool_id": "tgt-1", "tool_name": "demo", "output": "operator-pick"}],
     )
     remap = RemapTable()
     remap.record("custom_tool", "src-1", "tgt-1")

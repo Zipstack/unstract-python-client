@@ -39,12 +39,8 @@ _BROKEN_ADAPTER_SENTINELS: tuple[str, ...] = (
     "[NEEDS UPDATE]",
 )
 
-# Identity fields that point at backend rows by primary key. They were
-# populated server-side at create time on source and must NOT be carried
-# across orgs — the target's create_tool_instance has already set the
-# correct target values. Leaking source ids here makes the structure
-# tool fetch the source registry at runtime (platform-service looks up
-# registries by id only, no org scope) and load the wrong adapters.
+# Fields tied to the source row's own ids — never valid on the target.
+# Always rewrite these with target values before PATCHing.
 _SOURCE_IDENTITY_FIELDS: tuple[str, ...] = (
     "prompt_registry_id",
     "tool_instance_id",
@@ -86,7 +82,9 @@ class ToolInstancePhase(Phase):
         try:
             src_instances = self.ctx.source.list_tool_instances(workflow_id=src_wf_id)
         except Exception as e:
-            logger.exception("Failed to list source tool_instances for wf %s: %s", src_wf_id, e)
+            logger.exception(
+                "Failed to list source tool_instances for wf %s: %s", src_wf_id, e
+            )
             result.failed += 1
             result.errors.append(f"list src tool_instances {src_wf_id}: {e}")
             return
@@ -97,7 +95,8 @@ class ToolInstancePhase(Phase):
             # Backend enforces ≤1; warn loudly if invariant breaks on source.
             logger.warning(
                 "source workflow %s has %d tool_instances (expected ≤1) — migrating first only",
-                src_wf_id, len(src_instances),
+                src_wf_id,
+                len(src_instances),
             )
 
         src_ti = src_instances[0]
@@ -109,7 +108,8 @@ class ToolInstancePhase(Phase):
             logger.warning(
                 "skipping tool_instance %s — no registry remap for tool_id %s "
                 "(custom tool likely unpublished on source)",
-                src_ti_id, src_tool_id,
+                src_ti_id,
+                src_tool_id,
             )
             result.skipped += 1
             return
@@ -117,24 +117,40 @@ class ToolInstancePhase(Phase):
         try:
             existing = self.ctx.target.list_tool_instances(workflow_id=tgt_wf_id)
         except Exception as e:
-            logger.exception("Failed to list target tool_instances for wf %s: %s", tgt_wf_id, e)
+            logger.exception(
+                "Failed to list target tool_instances for wf %s: %s", tgt_wf_id, e
+            )
             result.failed += 1
             result.errors.append(f"list tgt tool_instances {tgt_wf_id}: {e}")
             return
 
         if existing:
             tgt_ti = existing[0]
+            if self.ctx.options.dry_run:
+                result.skipped += 1
+                logger.info(
+                    "[dry-run] would re-PATCH metadata on adopted tool_instance "
+                    "src=%s -> tgt=%s (workflow %s)",
+                    src_ti_id,
+                    tgt_ti["id"],
+                    tgt_wf_id,
+                )
+                self.ctx.remap.record("tool_instance", src_ti_id, tgt_ti["id"])
+                return
             result.adopted += 1
             logger.info(
                 "adopted tool_instance src=%s -> tgt=%s (workflow %s)",
-                src_ti_id, tgt_ti["id"], tgt_wf_id,
+                src_ti_id,
+                tgt_ti["id"],
+                tgt_wf_id,
             )
         elif self.ctx.options.dry_run:
             result.skipped += 1
             logger.info(
                 "[dry-run] would create tool_instance for tgt workflow %s "
                 "(src tool_instance %s)",
-                tgt_wf_id, src_ti_id,
+                tgt_wf_id,
+                src_ti_id,
             )
             return
         else:
@@ -152,7 +168,9 @@ class ToolInstancePhase(Phase):
             result.created += 1
             logger.info(
                 "created tool_instance src=%s -> tgt=%s (workflow %s)",
-                src_ti_id, tgt_ti["id"], tgt_wf_id,
+                src_ti_id,
+                tgt_ti["id"],
+                tgt_wf_id,
             )
 
         # PATCH the metadata regardless of created/adopted — keeps tool config
@@ -164,13 +182,22 @@ class ToolInstancePhase(Phase):
                 "skipping metadata PATCH for tool_instance src=%s tgt=%s — "
                 "source metadata carries broken adapter refs %s; "
                 "row exists with backend defaults, re-bind in UI",
-                src_ti_id, tgt_ti["id"], broken,
+                src_ti_id,
+                tgt_ti["id"],
+                broken,
             )
             result.errors.append(
                 f"stale adapter refs on src tool_instance {src_ti_id}: {broken}"
             )
         else:
-            patch_metadata = _strip_source_identity(src_metadata)
+            # PATCH overwrites the whole metadata dict, so we must include
+            # the target's own identity fields or the runtime sees them
+            # as empty. tool_id IS the prompt_registry_id.
+            patch_metadata = {
+                **_strip_source_identity(src_metadata),
+                "prompt_registry_id": tgt_tool_id,
+                "tool_instance_id": tgt_ti["id"],
+            }
             try:
                 self.ctx.target.update_tool_instance_metadata(
                     tgt_ti["id"], patch_metadata

@@ -24,16 +24,12 @@ class FakeClient:
         self.endpoints: dict[str, list[dict]] = {}
         self.patch_calls: list[tuple[str, dict]] = []
 
-    def list_workflow_endpoints(
-        self, *, workflow_id: str | None = None
-    ) -> list[dict]:
+    def list_workflow_endpoints(self, *, workflow_id: str | None = None) -> list[dict]:
         if workflow_id is None:
             return [ep for eps in self.endpoints.values() for ep in eps]
         return list(self.endpoints.get(workflow_id, []))
 
-    def update_workflow_endpoint(
-        self, endpoint_id: str, payload: dict
-    ) -> dict:
+    def update_workflow_endpoint(self, endpoint_id: str, payload: dict) -> dict:
         self.patch_calls.append((endpoint_id, payload))
         for eps in self.endpoints.values():
             for ep in eps:
@@ -131,6 +127,34 @@ def test_pairs_endpoints_by_type_and_remaps_connector():
     assert ctx.remap.resolve("workflow_endpoint", "src-ep-dest") == "tgt-ep-dest"
 
 
+def test_endpoint_with_null_connection_type_omits_key_in_payload():
+    # Source had connection_type=None (rare but legal on the model).
+    # Must NOT coerce to "" — backend treats blank as a validation
+    # failure on the enum. Omit the key entirely so backend keeps the
+    # existing target value.
+    src = FakeClient()
+    src.endpoints[SRC_WF] = [
+        {
+            "id": "src-ep-source",
+            "workflow": SRC_WF,
+            "endpoint_type": "SOURCE",
+            "connection_type": None,
+            "configuration": {},
+            "connector_instance": None,
+        }
+    ]
+    tgt = FakeClient()
+    tgt.endpoints[TGT_WF] = [_tgt_endpoint("tgt-ep-source", "SOURCE")]
+    ctx = _ctx(src, tgt, remap=_seed_remap())
+
+    result = WorkflowEndpointPhase(ctx).run(CloneReport())
+
+    assert result.failed == 0
+    assert len(tgt.patch_calls) == 1
+    _, payload = tgt.patch_calls[0]
+    assert "connection_type" not in payload
+
+
 def test_endpoint_without_source_connector_patches_with_null():
     src = FakeClient()
     src.endpoints[SRC_WF] = [
@@ -183,9 +207,7 @@ def test_unknown_connector_uuid_skips_endpoint_and_flags_error():
 
 def test_missing_target_endpoint_fails_loudly():
     src = FakeClient()
-    src.endpoints[SRC_WF] = [
-        _src_endpoint("src-ep-source", "SOURCE", SRC_CONN, {})
-    ]
+    src.endpoints[SRC_WF] = [_src_endpoint("src-ep-source", "SOURCE", SRC_CONN, {})]
     tgt = FakeClient()
     tgt.endpoints[TGT_WF] = []  # No endpoints — anomaly.
     ctx = _ctx(src, tgt, remap=_seed_remap())
@@ -198,9 +220,7 @@ def test_missing_target_endpoint_fails_loudly():
 
 def test_dry_run_makes_no_patches():
     src = FakeClient()
-    src.endpoints[SRC_WF] = [
-        _src_endpoint("src-ep-source", "SOURCE", SRC_CONN, {})
-    ]
+    src.endpoints[SRC_WF] = [_src_endpoint("src-ep-source", "SOURCE", SRC_CONN, {})]
     tgt = FakeClient()
     tgt.endpoints[TGT_WF] = [_tgt_endpoint("tgt-ep-source", "SOURCE")]
     ctx = _ctx(src, tgt, remap=_seed_remap(), dry_run=True)

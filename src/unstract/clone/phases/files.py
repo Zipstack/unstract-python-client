@@ -20,8 +20,7 @@ Skip mode (``file_strategy='skip'``):
 
 Concurrency is 1 per phase by design — the Platform API endpoint holds a
 cloud worker for the whole upload, and uploads are not chunked on the BE
-helper today. See ``docs/internal/files-clone-plan.md`` for the
-sizing rationale.
+helper today.
 """
 
 from __future__ import annotations
@@ -63,7 +62,9 @@ class FilesPhase(Phase):
         strategy = self.ctx.options.file_strategy
         logger.info(
             "files phase: strategy=%s tools=%d cap=%d bytes",
-            strategy, len(tool_remap), self.ctx.options.max_file_size,
+            strategy,
+            len(tool_remap),
+            self.ctx.options.max_file_size,
         )
 
         for src_tool_id, tgt_tool_id in tool_remap.items():
@@ -73,16 +74,17 @@ class FilesPhase(Phase):
             except Exception as e:
                 logger.exception(
                     "files: failed to list source DM rows for tool %s: %s",
-                    tool_name, e,
+                    tool_name,
+                    e,
                 )
                 result.failed += 1
-                result.errors.append(
-                    f"list source docs {tool_name}: {e}"
-                )
+                result.errors.append(f"list source docs {tool_name}: {e}")
                 continue
 
             if strategy == "skip":
-                self._emit_skip(src_docs, src_tool_id, tgt_tool_id, tool_name, report, result)
+                self._emit_skip(
+                    src_docs, src_tool_id, tgt_tool_id, tool_name, report, result
+                )
                 continue
 
             self._clone_tool(
@@ -105,7 +107,8 @@ class FilesPhase(Phase):
         except Exception as e:
             logger.exception(
                 "files: failed to list target DM rows for tool %s: %s",
-                tool_name, e,
+                tool_name,
+                e,
             )
             result.failed += 1
             result.errors.append(f"list target docs {tool_name}: {e}")
@@ -116,19 +119,30 @@ class FilesPhase(Phase):
             file_name = doc.get("document_name")
             src_document_id = doc.get("document_id")
             if not file_name or not src_document_id:
+                result.skipped += 1
+                result.errors.append(
+                    f"malformed source DM row on tool={tool_name}: {doc!r}"
+                )
+                logger.warning(
+                    "files: skipping malformed source DM row on tool=%s: %r",
+                    tool_name,
+                    doc,
+                )
                 continue
             if file_name in target_names:
                 result.skipped += 1
                 logger.debug(
                     "files: already present on target tool=%s file=%s",
-                    tool_name, file_name,
+                    tool_name,
+                    file_name,
                 )
                 continue
             if self.ctx.options.dry_run:
                 result.skipped += 1
                 logger.info(
                     "[dry-run] files: would clone tool=%s file=%s",
-                    tool_name, file_name,
+                    tool_name,
+                    file_name,
                 )
                 continue
             self._clone_one_file(
@@ -142,9 +156,7 @@ class FilesPhase(Phase):
             )
 
         if not self.ctx.options.dry_run:
-            self._ensure_default_doc(
-                src_tool_id, tgt_tool_id, tool_name, src_docs
-            )
+            self._ensure_default_doc(src_tool_id, tgt_tool_id, tool_name, src_docs)
 
     def _clone_one_file(
         self,
@@ -166,7 +178,9 @@ class FilesPhase(Phase):
         except Exception as e:
             logger.exception(
                 "files: download failed tool=%s file=%s: %s",
-                tool_name, file_name, e,
+                tool_name,
+                file_name,
+                e,
             )
             result.failed += 1
             report.failed_files.append(
@@ -184,8 +198,11 @@ class FilesPhase(Phase):
         if raw is None:
             logger.warning(
                 "files: unsupported mime tool=%s file=%s mime=%s",
-                tool_name, file_name, mime,
+                tool_name,
+                file_name,
+                mime,
             )
+            result.skipped += 1
             report.unsupported_files.append(
                 {
                     "tool_id": tgt_tool_id,
@@ -197,6 +214,7 @@ class FilesPhase(Phase):
             return
 
         if len(raw) > self.ctx.options.max_file_size:
+            result.skipped += 1
             report.oversize_files.append(
                 {
                     "tool_id": tgt_tool_id,
@@ -208,7 +226,10 @@ class FilesPhase(Phase):
             )
             logger.info(
                 "files: oversize tool=%s file=%s size=%d cap=%d",
-                tool_name, file_name, len(raw), self.ctx.options.max_file_size,
+                tool_name,
+                file_name,
+                len(raw),
+                self.ctx.options.max_file_size,
             )
             return
 
@@ -222,7 +243,9 @@ class FilesPhase(Phase):
         except Exception as e:
             logger.exception(
                 "files: upload failed tool=%s file=%s: %s",
-                tool_name, file_name, e,
+                tool_name,
+                file_name,
+                e,
             )
             result.failed += 1
             report.failed_files.append(
@@ -247,7 +270,9 @@ class FilesPhase(Phase):
         )
         logger.info(
             "files: uploaded tool=%s file=%s size=%d",
-            tool_name, file_name, len(raw),
+            tool_name,
+            file_name,
+            len(raw),
         )
 
     def _emit_skip(
@@ -275,7 +300,8 @@ class FilesPhase(Phase):
             result.skipped += 1
         logger.info(
             "files: skip mode emitted %d filenames for tool=%s",
-            len(src_docs), tool_name,
+            len(src_docs),
+            tool_name,
         )
 
     def _decode_payload(
@@ -318,7 +344,8 @@ class FilesPhase(Phase):
         except Exception as e:
             logger.warning(
                 "files: skipping default-doc set for tool=%s — fetch tgt failed: %s",
-                tool_name, e,
+                tool_name,
+                e,
             )
             return
 
@@ -334,7 +361,8 @@ class FilesPhase(Phase):
         except Exception as e:
             logger.warning(
                 "files: skipping default-doc set for tool=%s — list tgt docs failed: %s",
-                tool_name, e,
+                tool_name,
+                e,
             )
             return
         if not tgt_docs:
@@ -352,9 +380,7 @@ class FilesPhase(Phase):
                 "files: set default doc tool=%s doc_id=%s", tool_name, chosen_id
             )
         except Exception as e:
-            logger.warning(
-                "files: PATCH default doc failed tool=%s: %s", tool_name, e
-            )
+            logger.warning("files: PATCH default doc failed tool=%s: %s", tool_name, e)
 
     def _pick_default_doc_id(
         self,
@@ -373,20 +399,27 @@ class FilesPhase(Phase):
             logger.debug(
                 "files: source CustomTool fetch failed for tool=%s (%s); "
                 "falling back to first target doc",
-                tool_name, e,
+                tool_name,
+                e,
             )
             src_output = None
 
         if src_output:
             src_name = next(
-                (d.get("document_name") for d in src_docs
-                 if d.get("document_id") == src_output),
+                (
+                    d.get("document_name")
+                    for d in src_docs
+                    if d.get("document_id") == src_output
+                ),
                 None,
             )
             if src_name:
                 matched = next(
-                    (d.get("document_id") for d in tgt_docs
-                     if d.get("document_name") == src_name),
+                    (
+                        d.get("document_id")
+                        for d in tgt_docs
+                        if d.get("document_name") == src_name
+                    ),
                     None,
                 )
                 if matched:
@@ -395,11 +428,23 @@ class FilesPhase(Phase):
         return tgt_docs[0].get("document_id")
 
     def _lookup_tool_name(self, tgt_tool_id: str) -> str | None:
-        # CustomToolPhase doesn't record names; fetch lazily for log clarity.
-        # One call per tool is cheap relative to the per-file traffic.
+        # Cosmetic helper for logs only — never let a transport hiccup here
+        # mask a downstream "tool was deleted" or auth failure.
         try:
             tools = self.ctx.target.list_custom_tools()
-        except Exception:
+        except PlatformAPIError as e:
+            logger.warning(
+                "files: list_custom_tools failed during name lookup (%s); "
+                "log lines will fall back to tool ids",
+                e,
+            )
+            return None
+        except (requests.ConnectionError, requests.Timeout) as e:
+            logger.warning(
+                "files: transport error during tool-name lookup (%s); "
+                "log lines will fall back to tool ids",
+                e,
+            )
             return None
         for t in tools:
             if t.get("tool_id") == tgt_tool_id:
@@ -418,7 +463,11 @@ class FilesPhase(Phase):
                 sleep = _RETRY_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
                 logger.warning(
                     "files: retry %d/%d for %s after %d: sleeping %.1fs",
-                    attempt, _MAX_RETRIES, op, e.status_code, sleep,
+                    attempt,
+                    _MAX_RETRIES,
+                    op,
+                    e.status_code,
+                    sleep,
                 )
                 time.sleep(sleep)
             except (requests.ConnectionError, requests.Timeout) as e:
@@ -428,7 +477,11 @@ class FilesPhase(Phase):
                 sleep = _RETRY_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
                 logger.warning(
                     "files: retry %d/%d for %s after %s: sleeping %.1fs",
-                    attempt, _MAX_RETRIES, op, type(e).__name__, sleep,
+                    attempt,
+                    _MAX_RETRIES,
+                    op,
+                    type(e).__name__,
+                    sleep,
                 )
                 time.sleep(sleep)
         assert last_exc is not None

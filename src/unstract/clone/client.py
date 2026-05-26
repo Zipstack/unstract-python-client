@@ -27,7 +27,9 @@ DEFAULT_TIMEOUT = 60
 class PlatformClient:
     """HTTP client scoped to a single org via its Platform API key."""
 
-    def __init__(self, endpoint: OrgEndpoint, timeout: int = DEFAULT_TIMEOUT, verify: bool = True):
+    def __init__(
+        self, endpoint: OrgEndpoint, timeout: int = DEFAULT_TIMEOUT, verify: bool = True
+    ):
         self.endpoint = endpoint
         self.timeout = timeout
         self.verify = verify
@@ -41,6 +43,16 @@ class PlatformClient:
         # Cache the OPTIONS-derived writable-field set per entity path.
         # Backend serializer is the single source of truth; we read it once.
         self._post_schema_cache: dict[str, frozenset[str]] = {}
+
+    def close(self) -> None:
+        """Release the underlying HTTP connection pool."""
+        self._session.close()
+
+    def __enter__(self) -> "PlatformClient":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
 
     def _url(self, path: str) -> str:
         base = self.endpoint.base_url.rstrip("/")
@@ -178,9 +190,7 @@ class PlatformClient:
         """
         return self._request("GET", f"prompt-studio/{tool_id}/")
 
-    def update_custom_tool(
-        self, tool_id: str, body: dict[str, Any]
-    ) -> dict[str, Any]:
+    def update_custom_tool(self, tool_id: str, body: dict[str, Any]) -> dict[str, Any]:
         """PATCH a prompt-studio project. Used to set ``output`` (the
         default doc id) after the files phase populates DM rows."""
         return self._request("PATCH", f"prompt-studio/{tool_id}/", json=body)
@@ -192,9 +202,7 @@ class PlatformClient:
         default profile's adapter UUIDs so they can be remapped to
         target adapter ids for ``import_project``.
         """
-        result = self._request(
-            "GET", f"prompt-studio/prompt-studio-profile/{tool_id}/"
-        )
+        result = self._request("GET", f"prompt-studio/prompt-studio-profile/{tool_id}/")
         return result if isinstance(result, list) else result.get("results", [])
 
     def export_project(self, tool_id: str) -> dict[str, Any]:
@@ -226,9 +234,7 @@ class PlatformClient:
         required to wire the profile; otherwise backend falls back to
         a profile without adapters and flags ``needs_adapter_config``.
         """
-        tool_name = (
-            export_data.get("tool_metadata", {}).get("tool_name") or "export"
-        )
+        tool_name = export_data.get("tool_metadata", {}).get("tool_name") or "export"
         content = json_lib.dumps(export_data).encode()
         files = {"file": (f"{tool_name}.json", content, "application/json")}
         data: dict[str, Any] = {}
@@ -281,9 +287,7 @@ class PlatformClient:
         )
         return result if isinstance(result, list) else result.get("results", [])
 
-    def download_prompt_file(
-        self, tool_id: str, document_id: str
-    ) -> dict[str, Any]:
+    def download_prompt_file(self, tool_id: str, document_id: str) -> dict[str, Any]:
         """GET a Prompt Studio document by tool + DM row id.
 
         ``fetch_contents_ide`` resolves the filename internally from the
@@ -313,9 +317,7 @@ class PlatformClient:
         an IntegrityError → 500 on re-runs.
         """
         files = {"file": (file_name, data, mime_type)}
-        return self._request(
-            "POST", f"prompt-studio/file/{tool_id}", files=files
-        )
+        return self._request("POST", f"prompt-studio/file/{tool_id}", files=files)
 
     def export_custom_tool(self, tool_id: str, *, force: bool = True) -> Any:
         """Republish ``PromptStudioRegistry`` from the tool's current state.
@@ -415,9 +417,7 @@ class PlatformClient:
     def update_workflow_endpoint(
         self, endpoint_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        return self._request(
-            "PATCH", f"workflow/endpoint/{endpoint_id}/", json=payload
-        )
+        return self._request("PATCH", f"workflow/endpoint/{endpoint_id}/", json=payload)
 
     # ----- pipelines (ETL / TASK) -----
 
@@ -478,9 +478,7 @@ class PlatformClient:
     def update_api_deployment(
         self, deployment_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        return self._request(
-            "PATCH", f"api/deployment/{deployment_id}/", json=payload
-        )
+        return self._request("PATCH", f"api/deployment/{deployment_id}/", json=payload)
 
     # ----- API keys (per pipeline / deployment) -----
 

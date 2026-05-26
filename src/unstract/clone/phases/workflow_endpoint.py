@@ -46,7 +46,9 @@ class WorkflowEndpointPhase(Phase):
         result = report.get_phase(self.name)
         workflow_remap = self.ctx.remap.snapshot().get("workflow", {})
         if not workflow_remap:
-            logger.info("No workflows in remap; nothing to do for workflow_endpoint phase")
+            logger.info(
+                "No workflows in remap; nothing to do for workflow_endpoint phase"
+            )
             return result
 
         for src_wf_id, tgt_wf_id in workflow_remap.items():
@@ -90,12 +92,11 @@ class WorkflowEndpointPhase(Phase):
                 # workflow create flow failed earlier — surface loudly.
                 logger.warning(
                     "target workflow %s missing %s endpoint — skipping",
-                    tgt_wf_id, etype,
+                    tgt_wf_id,
+                    etype,
                 )
                 result.failed += 1
-                result.errors.append(
-                    f"missing tgt {etype} endpoint for wf {tgt_wf_id}"
-                )
+                result.errors.append(f"missing tgt {etype} endpoint for wf {tgt_wf_id}")
                 continue
 
             self._patch_endpoint(src_ep, tgt_ep, result)
@@ -111,7 +112,9 @@ class WorkflowEndpointPhase(Phase):
             result.skipped += 1
             logger.info(
                 "[dry-run] would PATCH %s endpoint src=%s -> tgt=%s",
-                etype, src_ep_id, tgt_ep_id,
+                etype,
+                src_ep_id,
+                tgt_ep_id,
             )
             return
 
@@ -127,7 +130,10 @@ class WorkflowEndpointPhase(Phase):
                 logger.warning(
                     "skipping %s endpoint src=%s tgt=%s — source connector %s "
                     "has no target remap; would silently unset connector",
-                    etype, src_ep_id, tgt_ep_id, src_conn_id,
+                    etype,
+                    src_ep_id,
+                    tgt_ep_id,
+                    src_conn_id,
                 )
                 result.skipped += 1
                 result.errors.append(
@@ -136,11 +142,18 @@ class WorkflowEndpointPhase(Phase):
                 )
                 return
 
+        # connection_type is a required enum on the backend; pass through
+        # source's value (incl. None) verbatim so the backend's validation
+        # surfaces the real problem rather than us papering over with "".
         payload: dict[str, Any] = {
-            "connection_type": src_ep.get("connection_type") or "",
-            "configuration": remap_uuids(src_ep.get("configuration") or {}, self.ctx.remap),
+            "configuration": remap_uuids(
+                src_ep.get("configuration") or {}, self.ctx.remap
+            ),
             "connector_instance_id": tgt_conn_id,
         }
+        src_connection_type = src_ep.get("connection_type")
+        if src_connection_type is not None:
+            payload["connection_type"] = src_connection_type
 
         try:
             self.ctx.target.update_workflow_endpoint(tgt_ep_id, payload)
@@ -155,6 +168,9 @@ class WorkflowEndpointPhase(Phase):
         result.created += 1
         logger.info(
             "patched %s endpoint src=%s -> tgt=%s (connector %s)",
-            etype, src_ep_id, tgt_ep_id, tgt_conn_id,
+            etype,
+            src_ep_id,
+            tgt_ep_id,
+            tgt_conn_id,
         )
         self.ctx.remap.record("workflow_endpoint", src_ep_id, tgt_ep_id)

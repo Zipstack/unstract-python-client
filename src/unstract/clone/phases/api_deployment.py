@@ -70,7 +70,8 @@ class APIDeploymentPhase(Phase):
         if not tgt_wf_id:
             logger.warning(
                 "no workflow remap for api_deployment '%s' (src workflow %s) — skipping",
-                api_name, src_wf_id,
+                api_name,
+                src_wf_id,
             )
             result.skipped += 1
             return
@@ -94,7 +95,9 @@ class APIDeploymentPhase(Phase):
             result.adopted += 1
             logger.info(
                 "adopted api_deployment '%s' src=%s -> tgt=%s",
-                api_name, src_id, tgt["id"],
+                api_name,
+                src_id,
+                tgt["id"],
             )
         elif self.ctx.options.dry_run:
             result.skipped += 1
@@ -103,22 +106,32 @@ class APIDeploymentPhase(Phase):
             )
             return
         else:
-            remapped = remap_uuids(src, self.ctx.remap)
+            try:
+                # list serializer can strip fields the create serializer expects.
+                full_src = self.ctx.source.get_api_deployment(src_id)
+            except Exception as e:
+                logger.exception(
+                    "Failed to GET source api_deployment %s: %s", api_name, e
+                )
+                result.failed += 1
+                result.errors.append(f"GET src api_deployment {api_name}: {e}")
+                return
+            remapped = remap_uuids(full_src, self.ctx.remap)
             payload = build_post_payload(remapped, self._writable)
             payload["workflow"] = tgt_wf_id
             try:
                 tgt = self.ctx.target.create_api_deployment(payload)
             except Exception as e:
-                logger.exception(
-                    "Failed to create api_deployment %s: %s", api_name, e
-                )
+                logger.exception("Failed to create api_deployment %s: %s", api_name, e)
                 result.failed += 1
                 result.errors.append(f"create {api_name}: {e}")
                 return
             result.created += 1
             logger.info(
                 "created api_deployment '%s' src=%s -> tgt=%s",
-                api_name, src_id, tgt["id"],
+                api_name,
+                src_id,
+                tgt["id"],
             )
             self._warn_if_extra_source_keys(src_id, api_name)
 
@@ -128,7 +141,14 @@ class APIDeploymentPhase(Phase):
         try:
             keys = self.ctx.source.list_api_deployment_keys(src_deployment_id)
         except Exception as e:
-            logger.debug("Could not list source keys for api_deployment %s: %s", name, e)
+            # WARNING (not DEBUG) — the operator needs to know we couldn't
+            # check whether they have additional keys to recreate manually.
+            logger.warning(
+                "Could not list source keys for api_deployment %s "
+                "(extra-key check skipped; re-verify in source UI): %s",
+                name,
+                e,
+            )
             return
         active = [k for k in keys if k.get("is_active")]
         if len(active) > 1:
@@ -136,5 +156,6 @@ class APIDeploymentPhase(Phase):
                 "source api_deployment '%s' had %d active API keys; "
                 "target has only the auto-provisioned default — "
                 "re-create the rest manually if your clients depend on them",
-                name, len(active),
+                name,
+                len(active),
             )

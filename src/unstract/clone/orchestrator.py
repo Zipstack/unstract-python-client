@@ -29,7 +29,7 @@ from unstract.clone.phases import (
     WorkflowPhase,
 )
 from unstract.clone.phases.base import Phase
-from unstract.clone.report import Endpoint, CloneReport
+from unstract.clone.report import CloneReport, Endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -64,29 +64,39 @@ def clone(
     setup errors or ``on_name_conflict='abort'`` collisions.
     """
     opts = options or CloneOptions()
-    ctx = CloneContext(
-        source=PlatformClient(source),
-        target=PlatformClient(target),
-        options=opts,
-    )
-    report = CloneReport(
-        source=Endpoint(base_url=source.base_url, organization_id=source.organization_id),
-        target=Endpoint(base_url=target.base_url, organization_id=target.organization_id),
-    )
+    src_client = PlatformClient(source)
+    tgt_client = PlatformClient(target)
+    try:
+        ctx = CloneContext(
+            source=src_client,
+            target=tgt_client,
+            options=opts,
+        )
+        report = CloneReport(
+            source=Endpoint(
+                base_url=source.base_url, organization_id=source.organization_id
+            ),
+            target=Endpoint(
+                base_url=target.base_url, organization_id=target.organization_id
+            ),
+        )
 
-    for name, phase_cls in PHASES:
-        if not opts.includes(name):
-            report.skipped_phases.append(name)
-            logger.info("Phase '%s' skipped (excluded)", name)
-            continue
-        logger.info("=== Phase: %s ===", name)
-        try:
-            phase_cls(ctx).run(report)
-        except CloneError as e:
-            report.aborted = True
-            report.abort_reason = str(e)
-            logger.error("Phase '%s' aborted: %s", name, e)
-            break
+        for name, phase_cls in PHASES:
+            if not opts.includes(name):
+                report.skipped_phases.append(name)
+                logger.info("Phase '%s' skipped (excluded)", name)
+                continue
+            logger.info("=== Phase: %s ===", name)
+            try:
+                phase_cls(ctx).run(report)
+            except CloneError as e:
+                report.aborted = True
+                report.abort_reason = str(e)
+                logger.error("Phase '%s' aborted: %s", name, e)
+                break
 
-    report.remap_snapshot = ctx.remap.snapshot()
-    return report
+        report.remap_snapshot = ctx.remap.snapshot()
+        return report
+    finally:
+        src_client.close()
+        tgt_client.close()

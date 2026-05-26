@@ -24,7 +24,6 @@ from unstract.clone.exceptions import NameConflictError
 from unstract.clone.phases.api_deployment import APIDeploymentPhase
 from unstract.clone.report import CloneReport
 
-
 API_DEPLOYMENT_POST_SCHEMA = frozenset(
     {
         "display_name",
@@ -53,6 +52,12 @@ class FakeClient:
         if api_name is not None:
             result = [d for d in result if d["api_name"] == api_name]
         return list(result)
+
+    def get_api_deployment(self, deployment_id: str) -> dict:
+        for d in self.deployments:
+            if d["id"] == deployment_id:
+                return dict(d)
+        raise KeyError(deployment_id)
 
     def create_api_deployment(self, payload: dict) -> dict:
         new = dict(payload)
@@ -111,9 +116,7 @@ def test_happy_path_creates_deployment_with_remapped_workflow():
 
 def test_adopts_existing_deployment_by_api_name():
     src = FakeClient([_src_deployment("src-dep-1", "invoices_api", "wf-src-1")])
-    tgt = FakeClient(
-        [{"id": "tgt-existing", "api_name": "invoices_api"}]
-    )
+    tgt = FakeClient([{"id": "tgt-existing", "api_name": "invoices_api"}])
     remap = RemapTable()
     remap.record("workflow", "wf-src-1", "wf-tgt-1")
     ctx = _ctx(src, tgt, remap=remap)

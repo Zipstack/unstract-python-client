@@ -80,7 +80,7 @@ class CustomToolPhase(Phase):
             logger.exception("Failed to list target tools: %s", e)
             result.failed += 1
             result.errors.append(f"list target tools: {e}")
-            return
+            return result
         for summary in src_tools:
             self._clone_one(summary, target_tools, result)
         return result
@@ -102,12 +102,12 @@ class CustomToolPhase(Phase):
             result.errors.append(f"export src tool {tool_name}: {e}")
             return
 
-        match = next(
-            (t for t in target_tools if t["tool_name"] == tool_name), None
-        )
+        match = next((t for t in target_tools if t["tool_name"] == tool_name), None)
 
         if match is not None:
-            tgt_tool_id = self._adopt(match, export_data, result, tool_name, src_tool_id)
+            tgt_tool_id = self._adopt(
+                match, export_data, result, tool_name, src_tool_id
+            )
         else:
             tgt_tool_id = self._create_fresh(
                 export_data, src_tool_id, tool_name, result
@@ -116,29 +116,27 @@ class CustomToolPhase(Phase):
             # with the same name (uncommon but legal) adopts this new
             # row instead of trying to re-create it.
             if tgt_tool_id is not None:
-                target_tools.append(
-                    {"tool_id": tgt_tool_id, "tool_name": tool_name}
-                )
+                target_tools.append({"tool_id": tgt_tool_id, "tool_name": tool_name})
 
         if tgt_tool_id is None:
             return
 
         self.ctx.remap.record("custom_tool", src_tool_id, tgt_tool_id)
 
+        if self.ctx.options.dry_run:
+            return
+
         try:
             self.ctx.target.export_custom_tool(tgt_tool_id)
-            logger.info("republished registry for tool '%s' tgt=%s", tool_name, tgt_tool_id)
+            logger.info(
+                "republished registry for tool '%s' tgt=%s", tool_name, tgt_tool_id
+            )
         except Exception as e:
             logger.exception("Registry republish failed for tool %s: %s", tool_name, e)
             result.failed += 1
             result.errors.append(f"export {tool_name}: {e}")
             return
 
-        # Record registry remap so ToolInstancePhase can rewrite
-        # ToolInstance.tool_id (which stores a registry UUID as CharField).
-        # Source registry exists only if the operator already published
-        # the tool there; unpublished source tools simply produce no
-        # ToolInstance rows for downstream to remap.
         try:
             src_regs = self.ctx.source.list_registries(custom_tool=src_tool_id)
             tgt_regs = self.ctx.target.list_registries(custom_tool=tgt_tool_id)
@@ -146,8 +144,11 @@ class CustomToolPhase(Phase):
             logger.warning(
                 "registry remap lookup failed for tool '%s' "
                 "(downstream ToolInstance clone may skip): %s",
-                tool_name, e,
+                tool_name,
+                e,
             )
+            result.failed += 1
+            result.errors.append(f"registry remap lookup {tool_name}: {e}")
             return
 
         if src_regs and tgt_regs:
@@ -175,7 +176,9 @@ class CustomToolPhase(Phase):
             result.skipped += 1
             logger.info(
                 "[dry-run] would sync prompts into adopted tool '%s' src=%s -> tgt=%s",
-                tool_name, src_tool_id, tgt_tool_id,
+                tool_name,
+                src_tool_id,
+                tgt_tool_id,
             )
             return tgt_tool_id
 
@@ -190,7 +193,9 @@ class CustomToolPhase(Phase):
         result.adopted += 1
         logger.info(
             "adopted tool '%s' src=%s -> tgt=%s (prompts re-synced)",
-            tool_name, src_tool_id, tgt_tool_id,
+            tool_name,
+            src_tool_id,
+            tgt_tool_id,
         )
         return tgt_tool_id
 
@@ -228,7 +233,10 @@ class CustomToolPhase(Phase):
         result.created += 1
         logger.info(
             "created tool '%s' src=%s -> tgt=%s (needs_adapter_config=%s)",
-            tool_name, src_tool_id, tgt_tool_id, tgt.get("needs_adapter_config"),
+            tool_name,
+            src_tool_id,
+            tgt_tool_id,
+            tgt.get("needs_adapter_config"),
         )
         return tgt_tool_id
 
@@ -268,7 +276,8 @@ class CustomToolPhase(Phase):
             if not adapter_name:
                 logger.warning(
                     "source default profile for tool '%s' missing adapter '%s'",
-                    tool_name, src_field,
+                    tool_name,
+                    src_field,
                 )
                 return None
             try:
@@ -276,13 +285,17 @@ class CustomToolPhase(Phase):
             except Exception as e:
                 logger.exception(
                     "list_adapters lookup failed for %s on tool '%s': %s",
-                    adapter_name, tool_name, e,
+                    adapter_name,
+                    tool_name,
+                    e,
                 )
                 return None
             if not matches:
                 logger.warning(
                     "no target adapter named '%s' for field %s on tool '%s'",
-                    adapter_name, src_field, tool_name,
+                    adapter_name,
+                    src_field,
+                    tool_name,
                 )
                 return None
             resolved[form_field] = matches[0]["id"]

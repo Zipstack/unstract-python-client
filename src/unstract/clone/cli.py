@@ -70,7 +70,9 @@ def cli() -> None:
 
 @cli.command("clone")
 @click.option("--source-url", required=True, help="Base URL of the source deployment")
-@click.option("--source-org", required=True, help="Source organization_id (slug in the URL path)")
+@click.option(
+    "--source-org", required=True, help="Source organization_id (slug in the URL path)"
+)
 @click.option(
     "--source-key",
     envvar="UNSTRACT_SRC_PLATFORM_KEY",
@@ -78,14 +80,18 @@ def cli() -> None:
     help="Source admin's Platform API key (or env UNSTRACT_SRC_PLATFORM_KEY)",
 )
 @click.option("--target-url", required=True, help="Base URL of the target deployment")
-@click.option("--target-org", required=True, help="Target organization_id (slug in the URL path)")
+@click.option(
+    "--target-org", required=True, help="Target organization_id (slug in the URL path)"
+)
 @click.option(
     "--target-key",
     envvar="UNSTRACT_TGT_PLATFORM_KEY",
     required=True,
     help="Target admin's Platform API key (or env UNSTRACT_TGT_PLATFORM_KEY)",
 )
-@click.option("--dry-run", is_flag=True, help="Plan only — do not POST anything to target")
+@click.option(
+    "--dry-run", is_flag=True, help="Plan only — do not POST anything to target"
+)
 @click.option(
     "--include",
     default=None,
@@ -161,7 +167,9 @@ def clone_cmd(
         on_name_conflict=on_name_conflict,
         verbose=verbose,
         file_strategy=effective_strategy,
-        max_file_size=cap_bytes or DEFAULT_MAX_FILE_SIZE,
+        # Distinguish "user said 0" (force every file to manual list) from
+        # an unparseable size — `_parse_size` raises in the latter case.
+        max_file_size=cap_bytes if cap_bytes is not None else DEFAULT_MAX_FILE_SIZE,
     )
 
     source = OrgEndpoint(

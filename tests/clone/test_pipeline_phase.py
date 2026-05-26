@@ -25,7 +25,6 @@ from unstract.clone.exceptions import NameConflictError
 from unstract.clone.phases.pipeline import PipelinePhase
 from unstract.clone.report import CloneReport
 
-
 PIPELINE_POST_SCHEMA = frozenset(
     {
         "pipeline_name",
@@ -61,6 +60,12 @@ class FakeClient:
         if pipeline_type is not None:
             result = [p for p in result if p.get("pipeline_type") == pipeline_type]
         return list(result)
+
+    def get_pipeline(self, pipeline_id: str) -> dict:
+        for p in self.pipelines:
+            if p["id"] == pipeline_id:
+                return dict(p)
+        raise KeyError(pipeline_id)
 
     def create_pipeline(self, payload: dict) -> dict:
         new = dict(payload)
@@ -111,9 +116,7 @@ def _ctx(source, target, *, remap=None, **opt_overrides):
 
 
 def test_happy_path_creates_pipeline_with_remapped_workflow():
-    src = FakeClient(
-        [_src_pipeline("src-pl-1", "Daily Invoices", "wf-src-1")]
-    )
+    src = FakeClient([_src_pipeline("src-pl-1", "Daily Invoices", "wf-src-1")])
     tgt = FakeClient()
     remap = RemapTable()
     remap.record("workflow", "wf-src-1", "wf-tgt-1")
@@ -129,10 +132,52 @@ def test_happy_path_creates_pipeline_with_remapped_workflow():
     assert ctx.remap.resolve("pipeline", "src-pl-1") == posted["id"]
 
 
+def test_create_uses_per_id_get_not_stripped_list_payload():
+    # list_pipelines can omit fields the create serializer expects. Phase
+    # must re-fetch the full record via get_pipeline before POSTing.
+    full = _src_pipeline("src-pl-1", "Daily Invoices", "wf-src-1")
+    full["cron_string"] = "0 5 * * *"  # only present on detail serializer.
+    stripped = {k: v for k, v in full.items() if k not in ("cron_string",)}
+
+    class StripListFakeClient(FakeClient):
+        def list_pipelines(self, *, name=None, pipeline_type=None):
+            base = (
+                [stripped]
+                if (
+                    (name is None or stripped["pipeline_name"] == name)
+                    and (
+                        pipeline_type is None
+                        or stripped["pipeline_type"] == pipeline_type
+                    )
+                )
+                else []
+            )
+            return list(base)
+
+        def get_pipeline(self, pipeline_id):
+            assert pipeline_id == full["id"]
+            return dict(full)
+
+    src = StripListFakeClient([full])
+    tgt = FakeClient()
+    remap = RemapTable()
+    remap.record("workflow", "wf-src-1", "wf-tgt-1")
+    ctx = _ctx(src, tgt, remap=remap)
+
+    PipelinePhase(ctx).run(CloneReport())
+
+    posted = tgt.posts[0]
+    # cron_string only existed on the detail GET — proves we did NOT
+    # POST the stripped list-item payload.
+    assert posted["cron_string"] == "0 5 * * *"
+
+
 def test_default_and_app_pipeline_types_are_skipped():
     src = FakeClient(
         [
-            _src_pipeline("src-1", "default-legacy", "wf-src-1", pipeline_type="DEFAULT"),
+            _src_pipeline(
+                "src-1", "default-legacy", "wf-src-1", pipeline_type="DEFAULT"
+            ),
             _src_pipeline("src-2", "streamlit-app", "wf-src-1", pipeline_type="APP"),
             _src_pipeline("src-3", "real-etl", "wf-src-1", pipeline_type="ETL"),
         ]
@@ -151,9 +196,7 @@ def test_default_and_app_pipeline_types_are_skipped():
 
 def test_adopts_existing_pipeline_by_name():
     src = FakeClient([_src_pipeline("src-pl-1", "Daily Invoices", "wf-src-1")])
-    tgt = FakeClient(
-        [{"id": "tgt-existing", "pipeline_name": "Daily Invoices"}]
-    )
+    tgt = FakeClient([{"id": "tgt-existing", "pipeline_name": "Daily Invoices"}])
     remap = RemapTable()
     remap.record("workflow", "wf-src-1", "wf-tgt-1")
     ctx = _ctx(src, tgt, remap=remap)

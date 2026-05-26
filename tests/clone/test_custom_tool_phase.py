@@ -25,7 +25,6 @@ from unstract.clone.exceptions import NameConflictError
 from unstract.clone.phases.custom_tool import CustomToolPhase
 from unstract.clone.report import CloneReport
 
-
 ADAPTER_NAMES = {
     "llm": "gpt4",
     "embedding_model": "ada-embed",
@@ -168,7 +167,12 @@ def _src_default_profile(*, nested: bool = False) -> dict:
 
 def _src_export_blob(tool_name: str) -> dict:
     return {
-        "tool_metadata": {"tool_name": tool_name, "description": "x", "author": "a", "icon": None},
+        "tool_metadata": {
+            "tool_name": tool_name,
+            "description": "x",
+            "author": "a",
+            "icon": None,
+        },
         "tool_settings": {"preamble": "p", "postamble": "q"},
         "default_profile_settings": {
             "chunk_size": 1024,
@@ -179,7 +183,11 @@ def _src_export_blob(tool_name: str) -> dict:
             "profile_name": "Default",
         },
         "prompts": [
-            {"prompt_key": "field_a", "prompt": "What is field_a?", "sequence_number": 1}
+            {
+                "prompt_key": "field_a",
+                "prompt": "What is field_a?",
+                "sequence_number": 1,
+            }
         ],
         "export_metadata": {"exported_at": "2026-05-24T00:00:00Z"},
     }
@@ -299,6 +307,27 @@ def test_dry_run_makes_no_writes():
     assert tgt.import_calls == []
     assert tgt.sync_calls == []
     assert tgt.export_tool_calls == []
+
+
+def test_dry_run_on_adopt_path_does_not_republish_registry():
+    # Adopt path used to return tgt_tool_id even on dry-run, falling
+    # through to export_custom_tool (a real POST to the target).
+    src = FakeClient()
+    tgt = FakeClient()
+    _preload_source_tool(src, "src-tool-x", "Invoice Extractor")
+    tgt.tools["tgt-existing"] = {"tool_name": "Invoice Extractor"}
+    _seed_target_adapters(tgt)
+    ctx = _ctx(src, tgt, dry_run=True)
+
+    result = CustomToolPhase(ctx).run(CloneReport())
+
+    assert result.skipped == 1
+    assert tgt.sync_calls == []
+    assert tgt.import_calls == []
+    # Critical regression: registry republish must NOT fire on dry-run.
+    assert tgt.export_tool_calls == []
+    # Remap still recorded so downstream dry-run output stays coherent.
+    assert ctx.remap.resolve("custom_tool", "src-tool-x") == "tgt-existing"
 
 
 def test_missing_target_adapter_fails_tool_cleanly():

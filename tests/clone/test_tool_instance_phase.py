@@ -43,9 +43,7 @@ class FakeClient:
         self.create_calls.append(new)
         return new
 
-    def update_tool_instance_metadata(
-        self, instance_id: str, metadata: dict
-    ) -> dict:
+    def update_tool_instance_metadata(self, instance_id: str, metadata: dict) -> dict:
         self.patch_calls.append((instance_id, metadata))
         for wf_instances in self.instances.values():
             for ti in wf_instances:
@@ -91,7 +89,9 @@ def test_happy_path_creates_instance_then_patches_metadata():
     src = FakeClient()
     src.instances[SRC_WF] = [
         _src_ti(
-            "src-ti-1", SRC_WF, SRC_REG,
+            "src-ti-1",
+            SRC_WF,
+            SRC_REG,
             {
                 "llm": "My OpenAI",
                 "embedding": "MyEmb",
@@ -114,12 +114,17 @@ def test_happy_path_creates_instance_then_patches_metadata():
     posted = tgt.create_calls[0]
     assert posted["workflow_id"] == TGT_WF
     assert posted["tool_id"] == TGT_REG
-    # PATCH carries the source settings but never the source-internal
-    # identity fields — the target row already has its own.
+    # PATCH carries source settings but stamps identity fields with
+    # target values — backend PATCH overwrites the whole metadata dict.
     assert len(tgt.patch_calls) == 1
     patched_id, patched_metadata = tgt.patch_calls[0]
     assert patched_id == posted["id"]
-    assert patched_metadata == {"llm": "My OpenAI", "embedding": "MyEmb"}
+    assert patched_metadata == {
+        "llm": "My OpenAI",
+        "embedding": "MyEmb",
+        "prompt_registry_id": TGT_REG,
+        "tool_instance_id": posted["id"],
+    }
     assert ctx.remap.resolve("tool_instance", "src-ti-1") == posted["id"]
 
 
@@ -154,8 +159,18 @@ def test_adopt_existing_target_instance_and_repatch_metadata():
     assert result.adopted == 1
     assert result.created == 0
     assert tgt.create_calls == []
-    # PATCH still fires for the adopted instance to align metadata.
-    assert tgt.patch_calls == [("tgt-pre-ti", src_meta)]
+    # PATCH still fires on adopt and stamps identity fields with target
+    # values so the runtime can resolve the registry.
+    assert tgt.patch_calls == [
+        (
+            "tgt-pre-ti",
+            {
+                "llm": "My OpenAI",
+                "prompt_registry_id": TGT_REG,
+                "tool_instance_id": "tgt-pre-ti",
+            },
+        )
+    ]
     assert ctx.remap.resolve("tool_instance", "src-ti-1") == "tgt-pre-ti"
 
 
@@ -182,3 +197,31 @@ def test_dry_run_does_not_create_or_patch():
     assert result.skipped == 1
     assert tgt.create_calls == []
     assert tgt.patch_calls == []
+
+
+def test_dry_run_on_adopt_path_does_not_repatch_target():
+    # Target already has a tool_instance for the target workflow. On a
+    # dry-run, we must NOT PATCH its metadata — the adopt branch used to
+    # fall through to the PATCH call.
+    src = FakeClient()
+    src.instances[SRC_WF] = [_src_ti("src-ti-1", SRC_WF, SRC_REG, {"llm": "My OpenAI"})]
+    tgt = FakeClient()
+    tgt.instances[TGT_WF] = [
+        {
+            "id": "tgt-pre-ti",
+            "workflow": TGT_WF,
+            "tool_id": TGT_REG,
+            "metadata": {"existing": "untouched"},
+            "step": 1,
+        }
+    ]
+    ctx = _ctx(src, tgt, remap=_seed_remap(), dry_run=True)
+
+    result = ToolInstancePhase(ctx).run(CloneReport())
+
+    assert result.skipped == 1
+    assert result.adopted == 0
+    assert tgt.create_calls == []
+    assert tgt.patch_calls == []
+    # Remap still gets recorded so downstream dry-run output is coherent.
+    assert ctx.remap.resolve("tool_instance", "src-ti-1") == "tgt-pre-ti"

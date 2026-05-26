@@ -55,7 +55,8 @@ class PipelinePhase(Phase):
         if skipped_types:
             logger.info(
                 "Found %d source pipeline(s); skipping %d of unsupported type (DEFAULT/APP)",
-                len(src_pipelines), skipped_types,
+                len(src_pipelines),
+                skipped_types,
             )
         else:
             logger.info("Found %d source pipeline(s)", len(src_pipelines))
@@ -78,7 +79,8 @@ class PipelinePhase(Phase):
         if not tgt_wf_id:
             logger.warning(
                 "no workflow remap for pipeline '%s' (src workflow %s) — skipping",
-                name, src_wf_id,
+                name,
+                src_wf_id,
             )
             result.skipped += 1
             return
@@ -106,7 +108,15 @@ class PipelinePhase(Phase):
             logger.info("[dry-run] would create pipeline '%s' src=%s", name, src_id)
             return
         else:
-            remapped = remap_uuids(src, self.ctx.remap)
+            try:
+                # list serializer can strip fields the create serializer expects.
+                full_src = self.ctx.source.get_pipeline(src_id)
+            except Exception as e:
+                logger.exception("Failed to GET source pipeline %s: %s", name, e)
+                result.failed += 1
+                result.errors.append(f"GET src pipeline {name}: {e}")
+                return
+            remapped = remap_uuids(full_src, self.ctx.remap)
             payload = build_post_payload(remapped, self._writable)
             payload["workflow"] = tgt_wf_id
             try:
@@ -128,7 +138,14 @@ class PipelinePhase(Phase):
         try:
             keys = self.ctx.source.list_pipeline_keys(src_pipeline_id)
         except Exception as e:
-            logger.debug("Could not list source keys for pipeline %s: %s", name, e)
+            # WARNING (not DEBUG) — the operator needs to know we couldn't
+            # check whether they have additional keys to recreate manually.
+            logger.warning(
+                "Could not list source keys for pipeline %s "
+                "(extra-key check skipped; re-verify in source UI): %s",
+                name,
+                e,
+            )
             return
         active = [k for k in keys if k.get("is_active")]
         if len(active) > 1:
@@ -136,5 +153,6 @@ class PipelinePhase(Phase):
                 "source pipeline '%s' had %d active API keys; "
                 "target has only the auto-provisioned default — "
                 "re-create the rest manually if your clients depend on them",
-                name, len(active),
+                name,
+                len(active),
             )

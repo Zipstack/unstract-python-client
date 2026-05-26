@@ -1,11 +1,28 @@
 # Cloning Organizations
 
+> [!NOTE]
+> **Users are not cloned.** Two reasons:
+> - The same user may not need access in every environment.
+> - The same user may hold different roles across environments.
+>
+> **Groups _will_ be cloned** (upcoming — not yet implemented). Once available, an admin can add the right users to each group per environment.
+
 Clone an Unstract organization's configured resources into another organization (same deployment or different). Useful for environment promotion (DEV → QA → PROD) and for spinning up a fresh org from a known-good baseline.
 
 Cloned resources: adapters, connectors, custom tools, prompts, profiles, workflows, tool instances, workflow endpoints, tags, API deployments, pipelines, and Prompt Studio document files. The source org is left untouched.
 
 > **Full documentation, behavior notes, CLI reference, and sample report:**
 > https://docs.unstract.com/unstract/unstract_platform/api_documentation/versions/v1-org-cloning/
+
+## Install
+
+From a clone of this repository:
+
+```bash
+uv sync --all-extras
+```
+
+This pulls in the `clone` extra (`click`, `rich`) needed by the CLI.
 
 ## Quickstart
 

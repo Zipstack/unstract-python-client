@@ -32,5 +32,8 @@ jobs:
       - name: Create test env
         run: cp tests/sample.env tests/.env
 
+      - name: Lint (ruff)
+        run: uv run ruff check src/
+
       - name: Tests (pytest)
         run: uv run pytest tests/ -v

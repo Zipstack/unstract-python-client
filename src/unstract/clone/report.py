@@ -27,7 +27,7 @@ class PhaseResult:
 
 @dataclass
 class Endpoint:
-    """Just enough about an endpoint for the report header — never carries the API key."""
+    """Endpoint identity for the report header — never carries the API key."""
 
     base_url: str
     organization_id: str

@@ -156,8 +156,8 @@ class FilesPhase(Phase):
                 continue
             if file_name in target_names:
                 result.skipped += 1
-                logger.debug(
-                    "files: already present on target tool=%s file=%s",
+                logger.info(
+                    "files: skipping tool=%s file=%s — already present on target",
                     tool_name,
                     file_name,
                 )

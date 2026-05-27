@@ -63,9 +63,10 @@ jobs:
           version: "0.6.14"
           enable-cache: true
 
-      # Install dependencies
+      # Install dependencies (must match test.yml so the release-run lint/test
+      # config matches the PR-gate; --all-extras pulls in the clone CLI deps).
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --dev --all-extras
 
       # Compute and stage the new version locally — defer commit/tag/release
       # until lint+tests+build+publish all pass, so any failure leaves main untouched.

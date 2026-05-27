@@ -186,6 +186,27 @@ def test_no_op_when_no_workflows_in_remap():
     assert tgt.create_calls == []
 
 
+def test_broken_adapter_refs_bumps_skipped_and_records_error():
+    src = FakeClient()
+    src.instances[SRC_WF] = [
+        _src_ti(
+            "src-ti-1",
+            SRC_WF,
+            SRC_REG,
+            {"llm": "[DELETED ADAPTER] My OpenAI", "embedding": "MyEmb"},
+        )
+    ]
+    tgt = FakeClient()
+    ctx = _ctx(src, tgt, remap=_seed_remap())
+
+    result = ToolInstancePhase(ctx).run(CloneReport())
+
+    assert result.created == 1
+    assert result.skipped == 1
+    assert tgt.patch_calls == []
+    assert any("stale adapter refs" in e for e in result.errors)
+
+
 def test_dry_run_does_not_create_or_patch():
     src = FakeClient()
     src.instances[SRC_WF] = [_src_ti("src-ti-1", SRC_WF, SRC_REG, {"x": 1})]

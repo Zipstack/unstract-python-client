@@ -202,6 +202,7 @@ class ToolInstancePhase(Phase):
                 broken,
             )
             with lock:
+                result.skipped += 1
                 result.errors.append(
                     f"stale adapter refs on src tool_instance {src_ti_id}: {broken}"
                 )

@@ -55,7 +55,7 @@ class PipelinePhase(Phase):
         skipped_types = len(src_pipelines) - len(migratable)
         if skipped_types:
             logger.info(
-                "Found %d source pipeline(s); skipping %d of unsupported type (DEFAULT/APP)",
+                "Found %d source pipeline(s); skipping %d unsupported (DEFAULT/APP)",
                 len(src_pipelines),
                 skipped_types,
             )

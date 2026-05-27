@@ -18,7 +18,7 @@ class PlatformAPIError(CloneError):
 
 
 class NameConflictError(CloneError):
-    """Raised when ``on_name_conflict='abort'`` and the target has a like-named entity."""
+    """Raised on name collision when ``on_name_conflict='abort'``."""
 
 
 class DependencyMissingError(CloneError):

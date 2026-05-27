@@ -103,7 +103,7 @@ class ToolInstancePhase(Phase):
             return
         if len(src_instances) > 1:
             logger.warning(
-                "source workflow %s has %d tool_instances (expected ≤1) — migrating first only",
+                "source workflow %s has %d tool_instances (>1) — migrating first only",
                 src_wf_id,
                 len(src_instances),
             )

@@ -76,7 +76,7 @@ class APIDeploymentPhase(Phase):
             tgt_wf_id = self.ctx.remap.resolve("workflow", src_wf_id)
         if not tgt_wf_id:
             logger.warning(
-                "no workflow remap for api_deployment '%s' (src workflow %s) — skipping",
+                "no workflow remap for api_deployment '%s' (src wf %s) — skipping",
                 api_name,
                 src_wf_id,
             )
@@ -99,7 +99,7 @@ class APIDeploymentPhase(Phase):
             tgt = existing[0]
             if self.ctx.options.on_name_conflict == "abort":
                 raise NameConflictError(
-                    f"api_deployment '{api_name}' already exists in target as {tgt['id']}"
+                    f"api_deployment '{api_name}' already on target as {tgt['id']}"
                 )
             with lock:
                 result.adopted += 1

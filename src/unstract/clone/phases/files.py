@@ -384,7 +384,7 @@ class FilesPhase(Phase):
             tgt_docs = self.ctx.target.list_prompt_documents(tgt_tool_id)
         except Exception as e:
             logger.warning(
-                "files: skipping default-doc set for tool=%s — list tgt docs failed: %s",
+                "files: skipping default-doc set for tool=%s — tgt list failed: %s",
                 tool_name,
                 e,
             )

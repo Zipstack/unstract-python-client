@@ -86,7 +86,7 @@ class ConnectorPhase(Phase):
         metadata = src.get("connector_metadata") or {}
         if not metadata:
             logger.info(
-                "skipping connector '%s' (src=%s, catalog=%s) — source returned no metadata",
+                "skipping connector '%s' (src=%s, catalog=%s) — no source metadata",
                 name,
                 src_id,
                 src.get("connector_id"),

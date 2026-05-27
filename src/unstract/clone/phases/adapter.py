@@ -83,7 +83,7 @@ class AdapterPhase(Phase):
             tgt = existing[0]
             if self.ctx.options.on_name_conflict == "abort":
                 raise NameConflictError(
-                    f"adapter '{name}' [{atype}] already exists in target as {tgt['id']}"
+                    f"adapter '{name}' [{atype}] already on target as {tgt['id']}"
                 )
             with lock:
                 result.adopted += 1

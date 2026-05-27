@@ -270,7 +270,7 @@ class CustomToolPhase(Phase):
             with lock:
                 result.failed += 1
                 result.errors.append(
-                    f"import {tool_name}: missing target adapter remap for default profile"
+                    f"import {tool_name}: missing target adapter remap for default"
                 )
             return None
 

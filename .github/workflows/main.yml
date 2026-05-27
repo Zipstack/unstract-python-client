@@ -68,9 +68,8 @@ jobs:
         run: uv sync --dev
 
       # Compute and stage the new version locally — defer commit/tag/release
-      # until lint+tests+build pass so a verification failure leaves main untouched.
+      # until lint+tests+build+publish all pass, so any failure leaves main untouched.
       - name: Compute new version
-        if: github.event_name == 'workflow_dispatch'
         id: version
         run: |
           CURRENT_VERSION=$(grep -E "^__version__ = " src/unstract/api_deployments/__init__.py | sed -E 's/__version__ = "(.*)"/\1/')
@@ -115,9 +114,13 @@ jobs:
       - name: Build package
         run: uv build
 
-      # Only reached if lint/tests/build all passed — safe to commit, tag, release.
+      # PyPI publish first because it is the only step that cannot be undone —
+      # if a later commit/tag/release step fails, the PyPI artifact is the
+      # source of truth and the git metadata can be retried manually.
+      - name: Publish to PyPI
+        run: uv publish
+
       - name: Commit version bump and create release
-        if: github.event_name == 'workflow_dispatch'
         run: |
           NEW_VERSION="${{ steps.version.outputs.version }}"
 
@@ -145,9 +148,6 @@ jobs:
           echo "Created release v$NEW_VERSION"
         env:
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
-
-      - name: Publish to PyPI
-        run: uv publish
 
       - name: Success message
         run: |

@@ -75,6 +75,8 @@ class CloneReport:
         console = Console(
             file=buf, force_terminal=True, color_system="truecolor", width=100
         )
+        # Actionable summary first so it doesn't scroll past the table.
+        self._render_failures_summary(console_print=console.print, rich=True)
         self._render_endpoints(console.print)
         table = Table(title="Clone Report", header_style="bold cyan")
         table.add_column("Phase", style="bold", justify="left")
@@ -151,7 +153,9 @@ class CloneReport:
         return f"{int(mins)}m{secs:.0f}s"
 
     def _render_plain(self) -> str:
-        lines = ["Clone Report", "=" * 60]
+        lines: list[str] = []
+        self._render_failures_summary(console_print=lines.append, rich=False)
+        lines.extend(["Clone Report", "=" * 60])
         self._render_endpoints(lines.append)
         header = (
             f"{'Phase':<24}{'Created':>10}{'Adopted':>10}"
@@ -280,6 +284,47 @@ class CloneReport:
             for row in rows:
                 lines.append(f"  - {self._describe_file_row(row)}")
         return lines
+
+    # Caps so a long traceback or many failures don't dominate the report.
+    _FAILURE_LINE_MAX_CHARS = 200
+    _FAILURE_MAX_ROWS = 30
+
+    def _render_failures_summary(self, console_print: Any, rich: bool) -> None:
+        rows: list[tuple[str, str]] = []
+        for p in self.phases:
+            for err in p.errors:
+                rows.append((p.name, err))
+        if not rows:
+            return
+        header = "Failures (see WARNING/ERROR log lines above for full detail)"
+        if rich:
+            console_print(f"[red]{header}:[/red]")
+        else:
+            console_print(f"{header}:")
+        shown = rows[: self._FAILURE_MAX_ROWS]
+        for phase_name, err in shown:
+            truncated = self._truncate(err, self._FAILURE_LINE_MAX_CHARS)
+            if rich:
+                console_print(
+                    f"  - [bold cyan]{phase_name}[/bold cyan]: {truncated}",
+                    highlight=False,
+                )
+            else:
+                console_print(f"  - {phase_name}: {truncated}")
+        remaining = len(rows) - len(shown)
+        if remaining > 0:
+            tail = f"  ... +{remaining} more — see logs"
+            if rich:
+                console_print(f"[dim]{tail}[/dim]")
+            else:
+                console_print(tail)
+
+    @staticmethod
+    def _truncate(text: str, limit: int) -> str:
+        text = text.replace("\n", " ")
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1] + "…"
 
     @staticmethod
     def _describe_file_row(row: dict[str, Any]) -> str:

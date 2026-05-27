@@ -79,6 +79,18 @@ class CustomToolPhase(Phase):
             result.errors.append(f"list target tools: {e}")
             return result
 
+        # Source's service-account view hides frictionless adapters; a
+        # profile-referenced name missing here flags a tool we can't migrate.
+        try:
+            self._src_adapter_names = {
+                a["adapter_name"] for a in self.ctx.source.list_adapters()
+            }
+        except Exception as e:
+            logger.exception("Failed to list source adapters: %s", e)
+            result.failed += 1
+            result.errors.append(f"list source adapters for visibility check: {e}")
+            return result
+
         # Updated under lock when a fresh create lands so duplicate
         # same-name source rows adopt instead of recreating.
         target_by_name: dict[str, dict[str, Any]] = {
@@ -235,7 +247,25 @@ class CustomToolPhase(Phase):
             )
             return None
 
-        adapter_ids = self._resolve_target_adapter_ids(src_tool_id, tool_name)
+        default_profile = self._source_default_profile(src_tool_id, tool_name)
+        if default_profile is None:
+            with lock:
+                result.failed += 1
+                result.errors.append(
+                    f"import {tool_name}: no default profile on source"
+                )
+            return None
+
+        invisible = self._invisible_source_adapter_names(default_profile)
+        if invisible:
+            self._register_frictionless_skip(
+                src_tool_id, tool_name, invisible, result, lock
+            )
+            return None
+
+        adapter_ids = self._resolve_target_adapter_ids(
+            default_profile, tool_name
+        )
         if adapter_ids is None:
             with lock:
                 result.failed += 1
@@ -265,17 +295,9 @@ class CustomToolPhase(Phase):
         )
         return tgt_tool_id
 
-    def _resolve_target_adapter_ids(
+    def _source_default_profile(
         self, src_tool_id: str, tool_name: str
-    ) -> dict[str, str] | None:
-        """Source profile carries adapter NAMES (per serializer); resolve
-        each name to a target adapter UUID via ``list_adapters(name=...)``.
-
-        Returns ``None`` if any of the four required adapters can't be
-        found on target — caller fails the tool. AdapterPhase preserves
-        names across orgs so this lookup should always hit when the
-        adapter clone ran cleanly.
-        """
+    ) -> dict[str, Any] | None:
         try:
             src_profiles = self.ctx.source.list_profiles(src_tool_id)
         except Exception as e:
@@ -293,11 +315,71 @@ class CustomToolPhase(Phase):
                 "source tool '%s' has no profiles to derive adapter ids from",
                 tool_name,
             )
-            return None
+        return default
 
+    def _invisible_source_adapter_names(
+        self, default_profile: dict[str, Any]
+    ) -> list[str]:
+        """Profile adapter names not in the source's visible adapter set
+        (typically frictionless) — these can't be migrated.
+        """
+        missing: list[str] = []
+        for src_field, _ in _PROFILE_ADAPTER_FIELDS:
+            adapter_name = _extract_adapter_name(default_profile.get(src_field))
+            if adapter_name and adapter_name not in self._src_adapter_names:
+                missing.append(adapter_name)
+        return missing
+
+    def _register_frictionless_skip(
+        self,
+        src_tool_id: str,
+        tool_name: str,
+        missing_adapters: list[str],
+        result: PhaseResult,
+        lock: threading.Lock,
+    ) -> None:
+        """Record the skip + source registry id so dependent workflows
+        cascade-skip downstream.
+        """
+        logger.warning(
+            "skipping tool '%s' src=%s — default profile references adapters "
+            "not visible to the source service account (frictionless?): %s. "
+            "Wire equivalents on target and re-run.",
+            tool_name,
+            src_tool_id,
+            missing_adapters,
+        )
+        try:
+            src_regs = self.ctx.source.list_registries(custom_tool=src_tool_id)
+        except Exception as e:
+            logger.warning(
+                "registry lookup failed for skipped tool '%s' — "
+                "downstream cascade-skip may not fire: %s",
+                tool_name,
+                e,
+            )
+            src_regs = []
+        with lock:
+            result.skipped += 1
+            for reg in src_regs:
+                reg_id = reg.get("prompt_registry_id")
+                if reg_id:
+                    self.ctx.skipped_custom_tool_registry_ids.add(reg_id)
+
+    def _resolve_target_adapter_ids(
+        self, default_profile: dict[str, Any], tool_name: str
+    ) -> dict[str, str] | None:
+        """Source profile carries adapter NAMES (per serializer); resolve
+        each name to a target adapter UUID via ``list_adapters(name=...)``.
+
+        Returns ``None`` if any of the four required adapters can't be
+        found on target — caller fails the tool. AdapterPhase preserves
+        names across orgs so this lookup should always hit when the
+        adapter clone ran cleanly.
+        """
         resolved: dict[str, str] = {}
         for src_field, form_field in _PROFILE_ADAPTER_FIELDS:
-            adapter_name = _extract_adapter_name(default.get(src_field))
+            adapter_name = _extract_adapter_name(default_profile.get(src_field))
             if not adapter_name:
                 logger.warning(
                     "source default profile for tool '%s' missing adapter '%s'",

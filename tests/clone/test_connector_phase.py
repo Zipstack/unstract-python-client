@@ -118,6 +118,31 @@ def test_redacted_metadata_connector_skipped():
     assert ctx.remap.resolve("connector", "src-ucs") is None
 
 
+def test_oauth_connector_skipped_before_post():
+    """OAuth-backed connectors (metadata carries access_token/refresh_token)
+    would fail target POST with OAuthTimeOut — skip ahead of POST so the
+    operator re-authorises post-clone.
+    """
+    oauth = _src("src-gdrive", "Unstract's google drive")
+    oauth["connector_metadata"] = {
+        "provider": "google-oauth2",
+        "uid": "src-user",
+        "access_token": "ya29.src-access",
+        "refresh_token": "1//src-refresh",
+    }
+    src = FakeClient([oauth])
+    tgt = FakeClient()
+    ctx = _ctx(src, tgt)
+
+    result = ConnectorPhase(ctx).run(CloneReport())
+
+    assert result.skipped == 1
+    assert result.created == 0
+    assert result.failed == 0
+    assert tgt.posts == []
+    assert ctx.remap.resolve("connector", "src-gdrive") is None
+
+
 def test_idempotency_zero_creates_on_rerun():
     src = FakeClient([_src("src-a", "Prod PG")])
     tgt = FakeClient(

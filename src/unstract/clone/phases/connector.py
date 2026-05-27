@@ -31,6 +31,15 @@ logger = logging.getLogger(__name__)
 
 CONNECTOR_PATH = "connector/"
 
+# Backend POST serializer trips on these keys (connector_v2/serializers.py)
+# by trying to refresh against the source user's social auth — guaranteed
+# OAuthTimeOut on target. Detect here and skip ahead of POST.
+_OAUTH_TOKEN_KEYS: frozenset[str] = frozenset({"access_token", "refresh_token"})
+
+
+def _has_oauth_tokens(metadata: dict[str, Any]) -> bool:
+    return any(metadata.get(k) for k in _OAUTH_TOKEN_KEYS)
+
 
 class ConnectorPhase(Phase):
     name = "connector"
@@ -74,9 +83,23 @@ class ConnectorPhase(Phase):
                 result.errors.append(f"GET source detail {name}: {e}")
             return
 
-        if not src.get("connector_metadata"):
+        metadata = src.get("connector_metadata") or {}
+        if not metadata:
             logger.info(
                 "skipping connector '%s' (src=%s, catalog=%s) — source returned no metadata",
+                name,
+                src_id,
+                src.get("connector_id"),
+            )
+            with lock:
+                result.skipped += 1
+            return
+
+        if _has_oauth_tokens(metadata):
+            logger.warning(
+                "skipping connector '%s' (src=%s, catalog=%s) — OAuth-backed; "
+                "re-authorise on target after the clone, then re-run to wire "
+                "dependent workflow endpoints.",
                 name,
                 src_id,
                 src.get("connector_id"),

@@ -41,6 +41,7 @@ class FakeClient:
     def __init__(self, workflows: list[dict] | None = None):
         self.workflows: list[dict] = list(workflows or [])
         self.posts: list[dict] = []
+        self.tool_instances: list[dict] = []
         self._next_id = 1
 
     def get_post_schema(self, entity_path: str) -> frozenset[str]:
@@ -51,6 +52,11 @@ class FakeClient:
         if name is not None:
             result = [w for w in result if w["workflow_name"] == name]
         return list(result)
+
+    def list_tool_instances(self, *, workflow_id: str | None = None) -> list[dict]:
+        if workflow_id is None:
+            return list(self.tool_instances)
+        return [ti for ti in self.tool_instances if ti.get("workflow") == workflow_id]
 
     def create_workflow(self, payload: dict) -> dict:
         new = dict(payload)
@@ -153,3 +159,27 @@ def test_abort_on_name_conflict_raises():
 
     with pytest.raises(NameConflictError):
         WorkflowPhase(ctx).run(CloneReport())
+
+
+def test_cascade_skip_when_workflow_tool_was_skipped():
+    """Workflow whose ToolInstance references a registry id in the
+    cascade-skip set must not land on target. Re-runs after the operator
+    wires the missing adapter pick it up naturally.
+    """
+    skipped_reg = "skipped-registry-id"
+    src = FakeClient([_src("wf-skipped", "Frictionless WF"), _src("wf-ok", "OK WF")])
+    src.tool_instances = [
+        {"workflow": "wf-skipped", "tool_id": skipped_reg},
+        {"workflow": "wf-ok", "tool_id": "other-registry-id"},
+    ]
+    tgt = FakeClient()
+    ctx = _ctx(src, tgt)
+    ctx.skipped_custom_tool_registry_ids.add(skipped_reg)
+
+    result = WorkflowPhase(ctx).run(CloneReport())
+
+    assert result.created == 1
+    assert result.skipped == 1
+    assert [p["workflow_name"] for p in tgt.posts] == ["OK WF"]
+    assert ctx.remap.resolve("workflow", "wf-skipped") is None
+    assert ctx.remap.resolve("workflow", "wf-ok") is not None

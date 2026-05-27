@@ -102,3 +102,6 @@ class CloneContext:
     target: PlatformClient
     options: CloneOptions
     remap: RemapTable = field(default_factory=RemapTable)
+    # Source prompt_registry_ids whose CustomTool was skipped; used to
+    # cascade-skip dependent workflows downstream.
+    skipped_custom_tool_registry_ids: set[str] = field(default_factory=set)

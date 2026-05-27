@@ -50,6 +50,9 @@ class WorkflowPhase(Phase):
             result.errors.append(f"list source workflows: {e}")
             return result
 
+        # Built once so per-workflow cascade-skip checks stay O(1).
+        self._wf_to_src_tool_id = self._collect_wf_tool_map(result)
+
         logger.info("Found %d workflow(s) in source org", len(src_workflows))
         self.parallel_map(
             src_workflows,
@@ -57,11 +60,46 @@ class WorkflowPhase(Phase):
         )
         return result
 
+    def _collect_wf_tool_map(self, result: PhaseResult) -> dict[str, str]:
+        """Map source workflow_id to its ToolInstance.tool_id; listed once
+        to avoid N+1 fetches.
+        """
+        if not self.ctx.skipped_custom_tool_registry_ids:
+            return {}
+        try:
+            tis = self.ctx.source.list_tool_instances()
+        except Exception as e:
+            logger.warning(
+                "workflow phase: failed to list source tool_instances for "
+                "cascade-skip lookup (%s); proceeding without cascade",
+                e,
+            )
+            return {}
+        mapping: dict[str, str] = {}
+        for ti in tis:
+            wf_id = ti.get("workflow")
+            tool_id = ti.get("tool_id")
+            if wf_id and tool_id:
+                mapping[wf_id] = tool_id
+        return mapping
+
     def _clone_one(
         self, src: dict[str, Any], result: PhaseResult, lock: threading.Lock
     ) -> None:
         name = src["workflow_name"]
         src_id = src["id"]
+
+        src_tool_id = self._wf_to_src_tool_id.get(src_id)
+        if src_tool_id and src_tool_id in self.ctx.skipped_custom_tool_registry_ids:
+            logger.warning(
+                "skipping workflow '%s' src=%s — its tool was skipped in "
+                "custom_tool phase (frictionless adapter dependence)",
+                name,
+                src_id,
+            )
+            with lock:
+                result.skipped += 1
+            return
 
         try:
             existing = self.ctx.target.list_workflows(name=name)

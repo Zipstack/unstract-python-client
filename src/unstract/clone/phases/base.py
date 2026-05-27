@@ -33,6 +33,7 @@ SERVER_MANAGED: frozenset[str] = frozenset(
         "created_at",
         "modified_at",
         "shared_users",
+        "workflow_owner",
     }
 )
 

@@ -139,6 +139,12 @@ def _seed_target_adapters(target: FakeClient) -> None:
         target.adapters_by_name[name] = {"id": adapter_id, "adapter_name": name}
 
 
+def _seed_source_adapters(source: FakeClient) -> None:
+    """Source-visible adapter set; phase uses it for frictionless detection."""
+    for name in ADAPTER_NAMES.values():
+        source.adapters_by_name[name] = {"id": f"src-{name}", "adapter_name": name}
+
+
 def _src_default_profile(*, nested: bool = False) -> dict:
     """Mirror the live ProfileManager serializer: adapter FKs render as
     flat NAME strings. ``nested=True`` covers the alternate dict shape
@@ -209,6 +215,7 @@ def test_fresh_imports_with_name_resolved_adapter_ids_and_records_registry():
     src = FakeClient()
     tgt = FakeClient()
     _preload_source_tool(src, "src-tool-x", "Invoice Extractor")
+    _seed_source_adapters(src)
     _seed_target_adapters(tgt)
     ctx = _ctx(src, tgt)
 
@@ -242,6 +249,7 @@ def test_nested_adapter_dict_also_resolves():
     src = FakeClient()
     tgt = FakeClient()
     _preload_source_tool(src, "src-tool-x", "T", nested_profile=True)
+    _seed_source_adapters(src)
     _seed_target_adapters(tgt)
     ctx = _ctx(src, tgt)
 
@@ -330,10 +338,36 @@ def test_dry_run_on_adopt_path_does_not_republish_registry():
     assert ctx.remap.resolve("custom_tool", "src-tool-x") == "tgt-existing"
 
 
+def test_frictionless_adapter_dependence_skips_tool_and_records_for_cascade():
+    """Source profile references an adapter NAME the source's
+    service-account view can't list (frictionless). Tool is skipped
+    cleanly and source registry id is recorded for WorkflowPhase to
+    cascade-skip dependent workflows.
+    """
+    src = FakeClient()
+    tgt = FakeClient()
+    _preload_source_tool(src, "src-tool-x", "Frictionless-Bound Tool")
+    # Source-visible adapters cover 3 of 4 — llm "gpt4" hidden.
+    for name in ("ada-embed", "pgvector", "llmw"):
+        src.adapters_by_name[name] = {"id": f"src-{name}", "adapter_name": name}
+    _seed_target_adapters(tgt)
+    ctx = _ctx(src, tgt)
+
+    result = CustomToolPhase(ctx).run(CloneReport())
+
+    assert result.skipped == 1
+    assert result.failed == 0
+    assert tgt.import_calls == []
+    assert tgt.export_tool_calls == []
+    assert ctx.remap.resolve("custom_tool", "src-tool-x") is None
+    assert SRC_REG in ctx.skipped_custom_tool_registry_ids
+
+
 def test_missing_target_adapter_fails_tool_cleanly():
     src = FakeClient()
     tgt = FakeClient()
     _preload_source_tool(src, "src-tool-x", "T")
+    _seed_source_adapters(src)
     # Only seed 3 of 4 adapters → x2text lookup misses on target.
     for name in ("gpt4", "ada-embed", "pgvector"):
         tgt.adapters_by_name[name] = {"id": TGT_ADAPTER_IDS[name], "adapter_name": name}

@@ -127,7 +127,20 @@ class WorkflowPhase(Phase):
             logger.info("[dry-run] would create workflow '%s' src=%s", name, src_id)
             return
         else:
-            remapped = remap_uuids(src, self.ctx.remap)
+            # List endpoints serve stripped payloads (e.g. AdapterListSerializer
+            # omits adapter_metadata_b); workflow detail carries the JSON blobs
+            # source_settings / destination_settings that embed connector UUIDs.
+            try:
+                src_detail = self.ctx.source.get_workflow(src_id)
+            except Exception as e:
+                logger.exception(
+                    "Failed to GET source workflow %s detail: %s", name, e
+                )
+                with lock:
+                    result.failed += 1
+                    result.errors.append(f"GET source detail {name}: {e}")
+                return
+            remapped = remap_uuids(src_detail, self.ctx.remap)
             payload = build_post_payload(remapped, self._writable)
             try:
                 tgt = self.ctx.target.create_workflow(payload)

@@ -53,6 +53,12 @@ class FakeClient:
             result = [w for w in result if w["workflow_name"] == name]
         return list(result)
 
+    def get_workflow(self, workflow_id: str) -> dict:
+        for w in self.workflows:
+            if w["id"] == workflow_id:
+                return dict(w)
+        raise KeyError(workflow_id)
+
     def list_tool_instances(self, *, workflow_id: str | None = None) -> list[dict]:
         if workflow_id is None:
             return list(self.tool_instances)

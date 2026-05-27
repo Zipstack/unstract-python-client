@@ -79,7 +79,9 @@ class RemapTable:
         return self._table.get(entity, {}).get(src_uuid)
 
     def resolve_any(self, src_uuid: str) -> str | None:
-        for mapping in self._table.values():
+        # Snapshot to avoid `RuntimeError: dictionary changed size during
+        # iteration` when a concurrent record() inserts a new entity bucket.
+        for mapping in list(self._table.values()):
             hit = mapping.get(src_uuid)
             if hit is not None:
                 return hit

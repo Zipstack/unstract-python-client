@@ -42,6 +42,9 @@ Both keys must be **org admin Platform API keys**.
 > Both keys grant broad access. Run from a trusted machine and rotate both keys after the clone completes.
 
 > [!NOTE]
+> **Unstract Cloud free-trial adapters are not cloned.** Trial adapters are platform-owned and filtered out of the source listing. Prompt Studio projects whose default profile references them are skipped, and that cascades to dependent workflows, API deployments, and pipelines. Provision your own adapters on the target org and re-run the clone to bring the rest across.
+
+> [!NOTE]
 > **OAuth-backed connectors need re-authorisation on target.** Connectors that use OAuth (e.g. Google Drive) are cloned without their refresh tokens — the Platform API never exposes them. Re-connect each one on the target after the clone.
 
 ## Re-runs are safe

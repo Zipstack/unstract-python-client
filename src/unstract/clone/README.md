@@ -41,6 +41,9 @@ Both keys must be **org admin Platform API keys**.
 > [!WARNING]
 > Both keys grant broad access. Run from a trusted machine and rotate both keys after the clone completes.
 
+> [!NOTE]
+> **OAuth-backed connectors need re-authorisation on target.** Connectors that use OAuth (e.g. Google Drive) are cloned without their refresh tokens — the Platform API never exposes them. Re-connect each one on the target after the clone.
+
 ## Re-runs are safe
 
 If a phase fails partway, fix the cause and re-run the same command. Resources already on the target are detected by name and reused. There is no `--resume-from` flag — the target is the state.

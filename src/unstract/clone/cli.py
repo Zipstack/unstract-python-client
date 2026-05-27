@@ -16,6 +16,7 @@ from typing import Any
 import click
 
 from unstract.clone.context import (
+    DEFAULT_CONCURRENCY,
     DEFAULT_MAX_FILE_SIZE,
     CloneOptions,
     OrgEndpoint,
@@ -133,6 +134,13 @@ def cli() -> None:
     is_flag=True,
     help="Alias for --file-strategy=skip.",
 )
+@click.option(
+    "--concurrency",
+    type=click.IntRange(min=1, max=32),
+    default=DEFAULT_CONCURRENCY,
+    show_default=True,
+    help="Per-phase worker count. 1 = strictly sequential.",
+)
 @click.option("-v", "--verbose", is_flag=True, help="Debug logging")
 def clone_cmd(
     source_url: str,
@@ -149,6 +157,7 @@ def clone_cmd(
     file_strategy: str,
     max_file_size: str,
     skip_files: bool,
+    concurrency: int,
     verbose: bool,
 ) -> None:
     """Clone configured resources from one org to another."""
@@ -167,9 +176,8 @@ def clone_cmd(
         on_name_conflict=on_name_conflict,
         verbose=verbose,
         file_strategy=effective_strategy,
-        # Distinguish "user said 0" (force every file to manual list) from
-        # an unparseable size — `_parse_size` raises in the latter case.
         max_file_size=cap_bytes if cap_bytes is not None else DEFAULT_MAX_FILE_SIZE,
+        concurrency=concurrency,
     )
 
     source = OrgEndpoint(

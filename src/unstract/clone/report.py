@@ -22,6 +22,7 @@ class PhaseResult:
     skipped: int = 0
     failed: int = 0
     errors: list[str] = field(default_factory=list)
+    duration_s: float = 0.0
 
 
 @dataclass
@@ -41,6 +42,7 @@ class CloneReport:
     remap_snapshot: dict[str, dict[str, str]] = field(default_factory=dict)
     aborted: bool = False
     abort_reason: str | None = None
+    total_duration_s: float = 0.0
     # Files-phase artifacts. Each entry carries enough context for an
     # operator to act on it without cross-referencing the run log.
     uploaded_files: list[dict[str, Any]] = field(default_factory=list)
@@ -70,11 +72,13 @@ class CloneReport:
         buf = StringIO()
         # force_terminal so ANSI codes survive the StringIO capture; the
         # caller decides whether to strip them when printing to a non-tty.
-        console = Console(file=buf, force_terminal=True, color_system="truecolor", width=100)
+        console = Console(
+            file=buf, force_terminal=True, color_system="truecolor", width=100
+        )
         self._render_endpoints(console.print)
         table = Table(title="Clone Report", header_style="bold cyan")
         table.add_column("Phase", style="bold", justify="left")
-        for col in ("Created", "Adopted", "Skipped", "Failed"):
+        for col in ("Created", "Adopted", "Skipped", "Failed", "Time"):
             table.add_column(col, justify="right")
 
         totals = {"created": 0, "adopted": 0, "skipped": 0, "failed": 0}
@@ -86,6 +90,7 @@ class CloneReport:
                 self._fmt_count(p.adopted, "green"),
                 self._fmt_count(p.skipped, "yellow"),
                 self._fmt_count(p.failed, "red"),
+                self._fmt_duration(p.duration_s),
             )
             for k in totals:
                 totals[k] += getattr(p, k)
@@ -97,10 +102,13 @@ class CloneReport:
             self._fmt_count(totals["adopted"], "green", bold=True),
             self._fmt_count(totals["skipped"], "yellow", bold=True),
             self._fmt_count(totals["failed"], "red", bold=True),
+            self._fmt_duration(self.total_duration_s, bold=True),
         )
         console.print(table)
         if self.skipped_phases:
-            console.print(f"[dim]Skipped phases:[/dim] {', '.join(self.skipped_phases)}")
+            console.print(
+                f"[dim]Skipped phases:[/dim] {', '.join(self.skipped_phases)}"
+            )
         self._render_files_sections(console)
         self._render_remap_summary(console_print=console.print)
         if self.aborted:
@@ -122,15 +130,42 @@ class CloneReport:
         style = f"bold {color}" if bold else color
         return f"[{style}]{value}[/{style}]"
 
+    @staticmethod
+    def _fmt_duration(seconds: float, bold: bool = False) -> str:
+        if seconds <= 0:
+            return "[dim]—[/dim]"
+        if seconds < 60:
+            text = f"{seconds:.1f}s"
+        else:
+            mins, secs = divmod(seconds, 60)
+            text = f"{int(mins)}m{secs:.0f}s"
+        return f"[bold]{text}[/bold]" if bold else text
+
+    @staticmethod
+    def _fmt_duration_plain(seconds: float) -> str:
+        if seconds <= 0:
+            return "—"
+        if seconds < 60:
+            return f"{seconds:.1f}s"
+        mins, secs = divmod(seconds, 60)
+        return f"{int(mins)}m{secs:.0f}s"
+
     def _render_plain(self) -> str:
         lines = ["Clone Report", "=" * 60]
         self._render_endpoints(lines.append)
-        header = f"{'Phase':<24}{'Created':>10}{'Adopted':>10}{'Skipped':>10}{'Failed':>10}"
+        header = (
+            f"{'Phase':<24}{'Created':>10}{'Adopted':>10}"
+            f"{'Skipped':>10}{'Failed':>10}{'Time':>10}"
+        )
         lines.append(header)
         for p in self.phases:
             lines.append(
-                f"{p.name:<24}{p.created:>10}{p.adopted:>10}{p.skipped:>10}{p.failed:>10}"
+                f"{p.name:<24}{p.created:>10}{p.adopted:>10}"
+                f"{p.skipped:>10}{p.failed:>10}{self._fmt_duration_plain(p.duration_s):>10}"
             )
+        lines.append(
+            f"{'TOTAL':<64}{self._fmt_duration_plain(self.total_duration_s):>10}"
+        )
         if self.skipped_phases:
             lines.append(f"Skipped phases: {', '.join(self.skipped_phases)}")
         lines.extend(self._files_sections_plain())
@@ -142,12 +177,18 @@ class CloneReport:
     def as_dict(self) -> dict[str, Any]:
         return {
             "source": (
-                {"base_url": self.source.base_url, "organization_id": self.source.organization_id}
+                {
+                    "base_url": self.source.base_url,
+                    "organization_id": self.source.organization_id,
+                }
                 if self.source
                 else None
             ),
             "target": (
-                {"base_url": self.target.base_url, "organization_id": self.target.organization_id}
+                {
+                    "base_url": self.target.base_url,
+                    "organization_id": self.target.organization_id,
+                }
                 if self.target
                 else None
             ),
@@ -159,6 +200,7 @@ class CloneReport:
                     "skipped": p.skipped,
                     "failed": p.failed,
                     "errors": list(p.errors),
+                    "duration_s": p.duration_s,
                 }
                 for p in self.phases
             ],
@@ -166,6 +208,7 @@ class CloneReport:
             "remap_snapshot": self.remap_snapshot,
             "aborted": self.aborted,
             "abort_reason": self.abort_reason,
+            "total_duration_s": self.total_duration_s,
             "uploaded_files": list(self.uploaded_files),
             "skipped_files": list(self.skipped_files),
             "oversize_files": list(self.oversize_files),
@@ -208,9 +251,7 @@ class CloneReport:
 
     def _render_files_sections(self, console: Any) -> None:
         if self.uploaded_files:
-            console.print(
-                f"[green]Files uploaded:[/green] {len(self.uploaded_files)}"
-            )
+            console.print(f"[green]Files uploaded:[/green] {len(self.uploaded_files)}")
         for header, rows in (
             ("Oversize files (manual upload required)", self.oversize_files),
             ("Unsupported mime files (manual upload required)", self.unsupported_files),

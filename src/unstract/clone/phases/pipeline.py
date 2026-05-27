@@ -14,6 +14,7 @@ lifecycle isn't shaped like an ETL/TASK pipeline.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 from unstract.clone.exceptions import NameConflictError
@@ -61,36 +62,44 @@ class PipelinePhase(Phase):
         else:
             logger.info("Found %d source pipeline(s)", len(src_pipelines))
 
-        for src in migratable:
-            self._clone_one(src, result)
+        self.parallel_map(
+            migratable,
+            lambda src, lock: self._clone_one(src, result, lock),
+        )
         return result
 
-    def _clone_one(self, src: dict[str, Any], result: PhaseResult) -> None:
+    def _clone_one(
+        self, src: dict[str, Any], result: PhaseResult, lock: threading.Lock
+    ) -> None:
         name = src["pipeline_name"]
         src_id = src["id"]
         src_wf_id = src.get("workflow") or src.get("workflow_id")
 
         if not src_wf_id:
             logger.warning("source pipeline '%s' has no workflow FK — skipping", name)
-            result.skipped += 1
+            with lock:
+                result.skipped += 1
             return
 
-        tgt_wf_id = self.ctx.remap.resolve("workflow", src_wf_id)
+        with lock:
+            tgt_wf_id = self.ctx.remap.resolve("workflow", src_wf_id)
         if not tgt_wf_id:
             logger.warning(
                 "no workflow remap for pipeline '%s' (src workflow %s) — skipping",
                 name,
                 src_wf_id,
             )
-            result.skipped += 1
+            with lock:
+                result.skipped += 1
             return
 
         try:
             existing = self.ctx.target.list_pipelines(name=name)
         except Exception as e:
             logger.exception("Failed to GET pipeline %s on target: %s", name, e)
-            result.failed += 1
-            result.errors.append(f"GET {name}: {e}")
+            with lock:
+                result.failed += 1
+                result.errors.append(f"GET {name}: {e}")
             return
 
         if existing:
@@ -99,22 +108,24 @@ class PipelinePhase(Phase):
                 raise NameConflictError(
                     f"pipeline '{name}' already exists in target as {tgt['id']}"
                 )
-            result.adopted += 1
+            with lock:
+                result.adopted += 1
             logger.info(
                 "adopted pipeline '%s' src=%s -> tgt=%s", name, src_id, tgt["id"]
             )
         elif self.ctx.options.dry_run:
-            result.skipped += 1
+            with lock:
+                result.skipped += 1
             logger.info("[dry-run] would create pipeline '%s' src=%s", name, src_id)
             return
         else:
             try:
-                # list serializer can strip fields the create serializer expects.
                 full_src = self.ctx.source.get_pipeline(src_id)
             except Exception as e:
                 logger.exception("Failed to GET source pipeline %s: %s", name, e)
-                result.failed += 1
-                result.errors.append(f"GET src pipeline {name}: {e}")
+                with lock:
+                    result.failed += 1
+                    result.errors.append(f"GET src pipeline {name}: {e}")
                 return
             remapped = remap_uuids(full_src, self.ctx.remap)
             payload = build_post_payload(remapped, self._writable)
@@ -123,16 +134,19 @@ class PipelinePhase(Phase):
                 tgt = self.ctx.target.create_pipeline(payload)
             except Exception as e:
                 logger.exception("Failed to create pipeline %s: %s", name, e)
-                result.failed += 1
-                result.errors.append(f"create {name}: {e}")
+                with lock:
+                    result.failed += 1
+                    result.errors.append(f"create {name}: {e}")
                 return
-            result.created += 1
+            with lock:
+                result.created += 1
             logger.info(
                 "created pipeline '%s' src=%s -> tgt=%s", name, src_id, tgt["id"]
             )
             self._warn_if_extra_source_keys(src_id, name)
 
-        self.ctx.remap.record("pipeline", src_id, tgt["id"])
+        with lock:
+            self.ctx.remap.record("pipeline", src_id, tgt["id"])
 
     def _warn_if_extra_source_keys(self, src_pipeline_id: str, name: str) -> None:
         try:

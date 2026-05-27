@@ -20,6 +20,7 @@ Notes:
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 from unstract.clone.phases.base import Phase
@@ -51,12 +52,20 @@ class WorkflowEndpointPhase(Phase):
             )
             return result
 
-        for src_wf_id, tgt_wf_id in workflow_remap.items():
-            self._clone_workflow_endpoints(src_wf_id, tgt_wf_id, result)
+        self.parallel_map(
+            list(workflow_remap.items()),
+            lambda pair, lock: self._clone_workflow_endpoints(
+                pair[0], pair[1], result, lock
+            ),
+        )
         return result
 
     def _clone_workflow_endpoints(
-        self, src_wf_id: str, tgt_wf_id: str, result: PhaseResult
+        self,
+        src_wf_id: str,
+        tgt_wf_id: str,
+        result: PhaseResult,
+        lock: threading.Lock,
     ) -> None:
         try:
             src_endpoints = self.ctx.source.list_workflow_endpoints(
@@ -66,8 +75,9 @@ class WorkflowEndpointPhase(Phase):
             logger.exception(
                 "Failed to list source endpoints for wf %s: %s", src_wf_id, e
             )
-            result.failed += 1
-            result.errors.append(f"list src endpoints {src_wf_id}: {e}")
+            with lock:
+                result.failed += 1
+                result.errors.append(f"list src endpoints {src_wf_id}: {e}")
             return
 
         try:
@@ -78,8 +88,9 @@ class WorkflowEndpointPhase(Phase):
             logger.exception(
                 "Failed to list target endpoints for wf %s: %s", tgt_wf_id, e
             )
-            result.failed += 1
-            result.errors.append(f"list tgt endpoints {tgt_wf_id}: {e}")
+            with lock:
+                result.failed += 1
+                result.errors.append(f"list tgt endpoints {tgt_wf_id}: {e}")
             return
 
         tgt_by_type = {ep["endpoint_type"]: ep for ep in tgt_endpoints}
@@ -88,28 +99,34 @@ class WorkflowEndpointPhase(Phase):
             etype = src_ep["endpoint_type"]
             tgt_ep = tgt_by_type.get(etype)
             if tgt_ep is None:
-                # Target should have auto-created this; missing means the
-                # workflow create flow failed earlier — surface loudly.
                 logger.warning(
                     "target workflow %s missing %s endpoint — skipping",
                     tgt_wf_id,
                     etype,
                 )
-                result.failed += 1
-                result.errors.append(f"missing tgt {etype} endpoint for wf {tgt_wf_id}")
+                with lock:
+                    result.failed += 1
+                    result.errors.append(
+                        f"missing tgt {etype} endpoint for wf {tgt_wf_id}"
+                    )
                 continue
 
-            self._patch_endpoint(src_ep, tgt_ep, result)
+            self._patch_endpoint(src_ep, tgt_ep, result, lock)
 
     def _patch_endpoint(
-        self, src_ep: dict[str, Any], tgt_ep: dict[str, Any], result: PhaseResult
+        self,
+        src_ep: dict[str, Any],
+        tgt_ep: dict[str, Any],
+        result: PhaseResult,
+        lock: threading.Lock,
     ) -> None:
         src_ep_id = src_ep["id"]
         tgt_ep_id = tgt_ep["id"]
         etype = src_ep["endpoint_type"]
 
         if self.ctx.options.dry_run:
-            result.skipped += 1
+            with lock:
+                result.skipped += 1
             logger.info(
                 "[dry-run] would PATCH %s endpoint src=%s -> tgt=%s",
                 etype,
@@ -121,12 +138,9 @@ class WorkflowEndpointPhase(Phase):
         src_conn_id = _extract_connector_id(src_ep)
         tgt_conn_id: str | None = None
         if src_conn_id:
-            tgt_conn_id = self.ctx.remap.resolve("connector", src_conn_id)
+            with lock:
+                tgt_conn_id = self.ctx.remap.resolve("connector", src_conn_id)
             if not tgt_conn_id:
-                # Source had a connector but it never made it through the
-                # connector phase (e.g. redacted secrets, skipped row).
-                # Patching the endpoint with connector=None would silently
-                # detach it on target; skip + flag so the operator notices.
                 logger.warning(
                     "skipping %s endpoint src=%s tgt=%s — source connector %s "
                     "has no target remap; would silently unset connector",
@@ -135,16 +149,14 @@ class WorkflowEndpointPhase(Phase):
                     tgt_ep_id,
                     src_conn_id,
                 )
-                result.skipped += 1
-                result.errors.append(
-                    f"unmapped connector on {etype} endpoint {src_ep_id}: "
-                    f"src_connector={src_conn_id}"
-                )
+                with lock:
+                    result.skipped += 1
+                    result.errors.append(
+                        f"unmapped connector on {etype} endpoint {src_ep_id}: "
+                        f"src_connector={src_conn_id}"
+                    )
                 return
 
-        # connection_type is a required enum on the backend; pass through
-        # source's value (incl. None) verbatim so the backend's validation
-        # surfaces the real problem rather than us papering over with "".
         payload: dict[str, Any] = {
             "configuration": remap_uuids(
                 src_ep.get("configuration") or {}, self.ctx.remap
@@ -161,11 +173,14 @@ class WorkflowEndpointPhase(Phase):
             logger.exception(
                 "Failed to PATCH %s endpoint tgt=%s: %s", etype, tgt_ep_id, e
             )
-            result.failed += 1
-            result.errors.append(f"patch {etype} {tgt_ep_id}: {e}")
+            with lock:
+                result.failed += 1
+                result.errors.append(f"patch {etype} {tgt_ep_id}: {e}")
             return
 
-        result.created += 1
+        with lock:
+            result.created += 1
+            self.ctx.remap.record("workflow_endpoint", src_ep_id, tgt_ep_id)
         logger.info(
             "patched %s endpoint src=%s -> tgt=%s (connector %s)",
             etype,
@@ -173,4 +188,3 @@ class WorkflowEndpointPhase(Phase):
             tgt_ep_id,
             tgt_conn_id,
         )
-        self.ctx.remap.record("workflow_endpoint", src_ep_id, tgt_ep_id)

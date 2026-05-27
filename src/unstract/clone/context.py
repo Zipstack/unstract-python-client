@@ -35,6 +35,7 @@ class OrgEndpoint:
 
 
 DEFAULT_MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB; oversize → manual-upload list
+DEFAULT_CONCURRENCY = 4
 
 
 @dataclass
@@ -50,6 +51,8 @@ class CloneOptions:
     # "skip": metadata only; operator re-uploads via UI on target.
     file_strategy: str = "platform_api"
     max_file_size: int = DEFAULT_MAX_FILE_SIZE
+    # Per-phase worker fan-out. 1 = sequential (no executor).
+    concurrency: int = DEFAULT_CONCURRENCY
 
     def includes(self, phase_name: str) -> bool:
         if self.include is not None and phase_name not in self.include:

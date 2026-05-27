@@ -18,16 +18,16 @@ Skip mode (``file_strategy='skip'``):
 - No download/upload. Source DM list is emitted into ``skipped_files`` so
   the operator knows what to re-upload manually via UI.
 
-Concurrency is 1 per phase by design — the Platform API endpoint holds a
-cloud worker for the whole upload, and uploads are not chunked on the BE
-helper today.
+Per-file work fans out across ``ctx.options.concurrency`` workers.
 """
 
 from __future__ import annotations
 
 import base64
 import logging
+import threading
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import requests
@@ -38,15 +38,21 @@ from unstract.clone.report import CloneReport, PhaseResult
 
 logger = logging.getLogger(__name__)
 
-# Mime types the BE's fetch_contents_ide endpoint round-trips losslessly.
-# PDF → base64; text/plain + text/csv → utf-8 string. Excel and other
-# types return a placeholder/unhandled — must be flagged for manual upload.
 _BASE64_MIMES: frozenset[str] = frozenset({"application/pdf"})
 _TEXT_MIMES: frozenset[str] = frozenset({"text/plain", "text/csv"})
 
 _RETRYABLE_STATUS: frozenset[int] = frozenset({502, 503, 504})
 _MAX_RETRIES = 3
 _RETRY_BACKOFF_BASE_SECONDS = 1.0
+
+
+@dataclass
+class _FileTask:
+    src_tool_id: str
+    tgt_tool_id: str
+    tool_name: str
+    file_name: str
+    src_document_id: str
 
 
 class FilesPhase(Phase):
@@ -61,12 +67,16 @@ class FilesPhase(Phase):
 
         strategy = self.ctx.options.file_strategy
         logger.info(
-            "files phase: strategy=%s tools=%d cap=%d bytes",
+            "files phase: strategy=%s tools=%d cap=%d bytes concurrency=%d",
             strategy,
             len(tool_remap),
             self.ctx.options.max_file_size,
+            self.ctx.options.concurrency,
         )
 
+        # Pass 1: build per-file task list sequentially (cheap).
+        file_tasks: list[_FileTask] = []
+        cloned_tools: list[tuple[str, str, str, list[dict[str, Any]]]] = []
         for src_tool_id, tgt_tool_id in tool_remap.items():
             tool_name = self._lookup_tool_name(tgt_tool_id) or src_tool_id
             try:
@@ -87,13 +97,27 @@ class FilesPhase(Phase):
                 )
                 continue
 
-            self._clone_tool(
+            tasks = self._build_tool_tasks(
                 src_tool_id, tgt_tool_id, tool_name, src_docs, report, result
             )
+            file_tasks.extend(tasks)
+            cloned_tools.append((src_tool_id, tgt_tool_id, tool_name, src_docs))
+
+        # Pass 2: download + upload each file in parallel.
+        if file_tasks:
+            self.parallel_map(
+                file_tasks,
+                lambda task, lock: self._clone_one_file(task, report, result, lock),
+            )
+
+        # Pass 3: set default doc per tool after all uploads land.
+        if not self.ctx.options.dry_run and strategy != "skip":
+            for src_tool_id, tgt_tool_id, tool_name, src_docs in cloned_tools:
+                self._ensure_default_doc(src_tool_id, tgt_tool_id, tool_name, src_docs)
 
         return result
 
-    def _clone_tool(
+    def _build_tool_tasks(
         self,
         src_tool_id: str,
         tgt_tool_id: str,
@@ -101,7 +125,7 @@ class FilesPhase(Phase):
         src_docs: list[dict[str, Any]],
         report: CloneReport,
         result: PhaseResult,
-    ) -> None:
+    ) -> list[_FileTask]:
         try:
             tgt_docs = self.ctx.target.list_prompt_documents(tgt_tool_id)
         except Exception as e:
@@ -112,9 +136,10 @@ class FilesPhase(Phase):
             )
             result.failed += 1
             result.errors.append(f"list target docs {tool_name}: {e}")
-            return
+            return []
         target_names = {d["document_name"] for d in tgt_docs}
 
+        tasks: list[_FileTask] = []
         for doc in src_docs:
             file_name = doc.get("document_name")
             src_document_id = doc.get("document_id")
@@ -145,52 +170,48 @@ class FilesPhase(Phase):
                     file_name,
                 )
                 continue
-            self._clone_one_file(
-                src_tool_id,
-                tgt_tool_id,
-                tool_name,
-                file_name,
-                src_document_id,
-                report,
-                result,
+            tasks.append(
+                _FileTask(
+                    src_tool_id=src_tool_id,
+                    tgt_tool_id=tgt_tool_id,
+                    tool_name=tool_name,
+                    file_name=file_name,
+                    src_document_id=src_document_id,
+                )
             )
-
-        if not self.ctx.options.dry_run:
-            self._ensure_default_doc(src_tool_id, tgt_tool_id, tool_name, src_docs)
+        return tasks
 
     def _clone_one_file(
         self,
-        src_tool_id: str,
-        tgt_tool_id: str,
-        tool_name: str,
-        file_name: str,
-        src_document_id: str,
+        task: _FileTask,
         report: CloneReport,
         result: PhaseResult,
+        lock: threading.Lock,
     ) -> None:
         try:
             payload = self._with_retry(
                 lambda: self.ctx.source.download_prompt_file(
-                    src_tool_id, src_document_id
+                    task.src_tool_id, task.src_document_id
                 ),
-                op=f"download {tool_name}/{file_name}",
+                op=f"download {task.tool_name}/{task.file_name}",
             )
         except Exception as e:
             logger.exception(
                 "files: download failed tool=%s file=%s: %s",
-                tool_name,
-                file_name,
+                task.tool_name,
+                task.file_name,
                 e,
             )
-            result.failed += 1
-            report.failed_files.append(
-                {
-                    "tool_id": tgt_tool_id,
-                    "tool_name": tool_name,
-                    "file_name": file_name,
-                    "error": f"download: {e}",
-                }
-            )
+            with lock:
+                result.failed += 1
+                report.failed_files.append(
+                    {
+                        "tool_id": task.tgt_tool_id,
+                        "tool_name": task.tool_name,
+                        "file_name": task.file_name,
+                        "error": f"download: {e}",
+                    }
+                )
             return
 
         mime = (payload or {}).get("mime_type") or ""
@@ -198,36 +219,38 @@ class FilesPhase(Phase):
         if raw is None:
             logger.warning(
                 "files: unsupported mime tool=%s file=%s mime=%s",
-                tool_name,
-                file_name,
+                task.tool_name,
+                task.file_name,
                 mime,
             )
-            result.skipped += 1
-            report.unsupported_files.append(
-                {
-                    "tool_id": tgt_tool_id,
-                    "tool_name": tool_name,
-                    "file_name": file_name,
-                    "mime_type": mime,
-                }
-            )
+            with lock:
+                result.skipped += 1
+                report.unsupported_files.append(
+                    {
+                        "tool_id": task.tgt_tool_id,
+                        "tool_name": task.tool_name,
+                        "file_name": task.file_name,
+                        "mime_type": mime,
+                    }
+                )
             return
 
         if len(raw) > self.ctx.options.max_file_size:
-            result.skipped += 1
-            report.oversize_files.append(
-                {
-                    "tool_id": tgt_tool_id,
-                    "tool_name": tool_name,
-                    "file_name": file_name,
-                    "size_bytes": len(raw),
-                    "cap_bytes": self.ctx.options.max_file_size,
-                }
-            )
+            with lock:
+                result.skipped += 1
+                report.oversize_files.append(
+                    {
+                        "tool_id": task.tgt_tool_id,
+                        "tool_name": task.tool_name,
+                        "file_name": task.file_name,
+                        "size_bytes": len(raw),
+                        "cap_bytes": self.ctx.options.max_file_size,
+                    }
+                )
             logger.info(
                 "files: oversize tool=%s file=%s size=%d cap=%d",
-                tool_name,
-                file_name,
+                task.tool_name,
+                task.file_name,
                 len(raw),
                 self.ctx.options.max_file_size,
             )
@@ -236,42 +259,44 @@ class FilesPhase(Phase):
         try:
             self._with_retry(
                 lambda: self.ctx.target.upload_prompt_file(
-                    tgt_tool_id, file_name, raw, mime
+                    task.tgt_tool_id, task.file_name, raw, mime
                 ),
-                op=f"upload {tool_name}/{file_name}",
+                op=f"upload {task.tool_name}/{task.file_name}",
             )
         except Exception as e:
             logger.exception(
                 "files: upload failed tool=%s file=%s: %s",
-                tool_name,
-                file_name,
+                task.tool_name,
+                task.file_name,
                 e,
             )
-            result.failed += 1
-            report.failed_files.append(
-                {
-                    "tool_id": tgt_tool_id,
-                    "tool_name": tool_name,
-                    "file_name": file_name,
-                    "error": f"upload: {e}",
-                }
-            )
+            with lock:
+                result.failed += 1
+                report.failed_files.append(
+                    {
+                        "tool_id": task.tgt_tool_id,
+                        "tool_name": task.tool_name,
+                        "file_name": task.file_name,
+                        "error": f"upload: {e}",
+                    }
+                )
             return
 
-        result.created += 1
-        report.uploaded_files.append(
-            {
-                "tool_id": tgt_tool_id,
-                "tool_name": tool_name,
-                "file_name": file_name,
-                "size_bytes": len(raw),
-                "mime_type": mime,
-            }
-        )
+        with lock:
+            result.created += 1
+            report.uploaded_files.append(
+                {
+                    "tool_id": task.tgt_tool_id,
+                    "tool_name": task.tool_name,
+                    "file_name": task.file_name,
+                    "size_bytes": len(raw),
+                    "mime_type": mime,
+                }
+            )
         logger.info(
             "files: uploaded tool=%s file=%s size=%d",
-            tool_name,
-            file_name,
+            task.tool_name,
+            task.file_name,
             len(raw),
         )
 
@@ -313,7 +338,6 @@ class FilesPhase(Phase):
         if data_field is None:
             return None
         if mime in _BASE64_MIMES:
-            # data_field is base64-encoded bytes (BE wraps with b64encode).
             if isinstance(data_field, bytes):
                 return base64.b64decode(data_field)
             return base64.b64decode(data_field.encode())
@@ -389,9 +413,6 @@ class FilesPhase(Phase):
         tgt_docs: list[dict[str, Any]],
         tool_name: str,
     ) -> str | None:
-        # Try mirroring the source's selection by filename. If source
-        # GET fails or source has no chosen doc, fall back to the first
-        # target doc so the FE doesn't render an empty selector.
         try:
             src_tool = self.ctx.source.get_custom_tool(src_tool_id)
             src_output = src_tool.get("output")
@@ -428,8 +449,6 @@ class FilesPhase(Phase):
         return tgt_docs[0].get("document_id")
 
     def _lookup_tool_name(self, tgt_tool_id: str) -> str | None:
-        # Cosmetic helper for logs only — never let a transport hiccup here
-        # mask a downstream "tool was deleted" or auth failure.
         try:
             tools = self.ctx.target.list_custom_tools()
         except PlatformAPIError as e:

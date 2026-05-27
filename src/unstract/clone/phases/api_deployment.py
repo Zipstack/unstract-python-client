@@ -14,6 +14,7 @@ post-clone).
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 from unstract.clone.exceptions import NameConflictError
@@ -50,11 +51,15 @@ class APIDeploymentPhase(Phase):
             return result
 
         logger.info("Found %d source API deployment(s)", len(src_deployments))
-        for src in src_deployments:
-            self._clone_one(src, result)
+        self.parallel_map(
+            src_deployments,
+            lambda src, lock: self._clone_one(src, result, lock),
+        )
         return result
 
-    def _clone_one(self, src: dict[str, Any], result: PhaseResult) -> None:
+    def _clone_one(
+        self, src: dict[str, Any], result: PhaseResult, lock: threading.Lock
+    ) -> None:
         api_name = src["api_name"]
         src_id = src["id"]
         src_wf_id = src.get("workflow") or src.get("workflow_id")
@@ -63,17 +68,20 @@ class APIDeploymentPhase(Phase):
             logger.warning(
                 "source api_deployment '%s' has no workflow FK — skipping", api_name
             )
-            result.skipped += 1
+            with lock:
+                result.skipped += 1
             return
 
-        tgt_wf_id = self.ctx.remap.resolve("workflow", src_wf_id)
+        with lock:
+            tgt_wf_id = self.ctx.remap.resolve("workflow", src_wf_id)
         if not tgt_wf_id:
             logger.warning(
                 "no workflow remap for api_deployment '%s' (src workflow %s) — skipping",
                 api_name,
                 src_wf_id,
             )
-            result.skipped += 1
+            with lock:
+                result.skipped += 1
             return
 
         try:
@@ -82,8 +90,9 @@ class APIDeploymentPhase(Phase):
             logger.exception(
                 "Failed to GET api_deployment %s on target: %s", api_name, e
             )
-            result.failed += 1
-            result.errors.append(f"GET {api_name}: {e}")
+            with lock:
+                result.failed += 1
+                result.errors.append(f"GET {api_name}: {e}")
             return
 
         if existing:
@@ -92,7 +101,8 @@ class APIDeploymentPhase(Phase):
                 raise NameConflictError(
                     f"api_deployment '{api_name}' already exists in target as {tgt['id']}"
                 )
-            result.adopted += 1
+            with lock:
+                result.adopted += 1
             logger.info(
                 "adopted api_deployment '%s' src=%s -> tgt=%s",
                 api_name,
@@ -100,21 +110,22 @@ class APIDeploymentPhase(Phase):
                 tgt["id"],
             )
         elif self.ctx.options.dry_run:
-            result.skipped += 1
+            with lock:
+                result.skipped += 1
             logger.info(
                 "[dry-run] would create api_deployment '%s' src=%s", api_name, src_id
             )
             return
         else:
             try:
-                # list serializer can strip fields the create serializer expects.
                 full_src = self.ctx.source.get_api_deployment(src_id)
             except Exception as e:
                 logger.exception(
                     "Failed to GET source api_deployment %s: %s", api_name, e
                 )
-                result.failed += 1
-                result.errors.append(f"GET src api_deployment {api_name}: {e}")
+                with lock:
+                    result.failed += 1
+                    result.errors.append(f"GET src api_deployment {api_name}: {e}")
                 return
             remapped = remap_uuids(full_src, self.ctx.remap)
             payload = build_post_payload(remapped, self._writable)
@@ -123,10 +134,12 @@ class APIDeploymentPhase(Phase):
                 tgt = self.ctx.target.create_api_deployment(payload)
             except Exception as e:
                 logger.exception("Failed to create api_deployment %s: %s", api_name, e)
-                result.failed += 1
-                result.errors.append(f"create {api_name}: {e}")
+                with lock:
+                    result.failed += 1
+                    result.errors.append(f"create {api_name}: {e}")
                 return
-            result.created += 1
+            with lock:
+                result.created += 1
             logger.info(
                 "created api_deployment '%s' src=%s -> tgt=%s",
                 api_name,
@@ -135,7 +148,8 @@ class APIDeploymentPhase(Phase):
             )
             self._warn_if_extra_source_keys(src_id, api_name)
 
-        self.ctx.remap.record("api_deployment", src_id, tgt["id"])
+        with lock:
+            self.ctx.remap.record("api_deployment", src_id, tgt["id"])
 
     def _warn_if_extra_source_keys(self, src_deployment_id: str, name: str) -> None:
         try:

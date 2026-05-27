@@ -16,6 +16,7 @@ non-trivial bits:
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 from unstract.clone.exceptions import NameConflictError
@@ -50,11 +51,15 @@ class WorkflowPhase(Phase):
             return result
 
         logger.info("Found %d workflow(s) in source org", len(src_workflows))
-        for src in src_workflows:
-            self._clone_one(src, result)
+        self.parallel_map(
+            src_workflows,
+            lambda src, lock: self._clone_one(src, result, lock),
+        )
         return result
 
-    def _clone_one(self, src: dict[str, Any], result: PhaseResult) -> None:
+    def _clone_one(
+        self, src: dict[str, Any], result: PhaseResult, lock: threading.Lock
+    ) -> None:
         name = src["workflow_name"]
         src_id = src["id"]
 
@@ -62,8 +67,9 @@ class WorkflowPhase(Phase):
             existing = self.ctx.target.list_workflows(name=name)
         except Exception as e:
             logger.exception("Failed to GET workflow %s on target: %s", name, e)
-            result.failed += 1
-            result.errors.append(f"GET {name}: {e}")
+            with lock:
+                result.failed += 1
+                result.errors.append(f"GET {name}: {e}")
             return
 
         if existing:
@@ -72,10 +78,14 @@ class WorkflowPhase(Phase):
                 raise NameConflictError(
                     f"workflow '{name}' already exists in target as {tgt['id']}"
                 )
-            result.adopted += 1
-            logger.info("adopted workflow '%s' src=%s -> tgt=%s", name, src_id, tgt["id"])
+            with lock:
+                result.adopted += 1
+            logger.info(
+                "adopted workflow '%s' src=%s -> tgt=%s", name, src_id, tgt["id"]
+            )
         elif self.ctx.options.dry_run:
-            result.skipped += 1
+            with lock:
+                result.skipped += 1
             logger.info("[dry-run] would create workflow '%s' src=%s", name, src_id)
             return
         else:
@@ -85,10 +95,15 @@ class WorkflowPhase(Phase):
                 tgt = self.ctx.target.create_workflow(payload)
             except Exception as e:
                 logger.exception("Failed to create workflow %s: %s", name, e)
-                result.failed += 1
-                result.errors.append(f"create {name}: {e}")
+                with lock:
+                    result.failed += 1
+                    result.errors.append(f"create {name}: {e}")
                 return
-            result.created += 1
-            logger.info("created workflow '%s' src=%s -> tgt=%s", name, src_id, tgt["id"])
+            with lock:
+                result.created += 1
+            logger.info(
+                "created workflow '%s' src=%s -> tgt=%s", name, src_id, tgt["id"]
+            )
 
-        self.ctx.remap.record("workflow", src_id, tgt["id"])
+        with lock:
+            self.ctx.remap.record("workflow", src_id, tgt["id"])

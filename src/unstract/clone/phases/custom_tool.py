@@ -28,6 +28,7 @@ land a half-wired profile.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 from unstract.clone.exceptions import NameConflictError
@@ -70,10 +71,6 @@ class CustomToolPhase(Phase):
             return result
 
         logger.info("Found %d custom tool(s) in source org", len(src_tools))
-        # Fetch the target list once — name-based adoption lookup is
-        # done per source tool, but the underlying list is invariant
-        # across the loop barring our own creates (which we splice into
-        # ``target_tools`` after each create so re-runs stay idempotent).
         try:
             target_tools = self.ctx.target.list_custom_tools()
         except Exception as e:
@@ -81,15 +78,27 @@ class CustomToolPhase(Phase):
             result.failed += 1
             result.errors.append(f"list target tools: {e}")
             return result
-        for summary in src_tools:
-            self._clone_one(summary, target_tools, result)
+
+        # Updated under lock when a fresh create lands so duplicate
+        # same-name source rows adopt instead of recreating.
+        target_by_name: dict[str, dict[str, Any]] = {
+            t["tool_name"]: t for t in target_tools
+        }
+
+        self.parallel_map(
+            src_tools,
+            lambda summary, lock: self._clone_one(
+                summary, target_by_name, result, lock
+            ),
+        )
         return result
 
     def _clone_one(
         self,
         summary: dict[str, Any],
-        target_tools: list[dict[str, Any]],
+        target_by_name: dict[str, dict[str, Any]],
         result: PhaseResult,
+        lock: threading.Lock,
     ) -> None:
         tool_name = summary["tool_name"]
         src_tool_id = summary["tool_id"]
@@ -98,30 +107,34 @@ class CustomToolPhase(Phase):
             export_data = self.ctx.source.export_project(src_tool_id)
         except Exception as e:
             logger.exception("Failed to export source tool '%s': %s", tool_name, e)
-            result.failed += 1
-            result.errors.append(f"export src tool {tool_name}: {e}")
+            with lock:
+                result.failed += 1
+                result.errors.append(f"export src tool {tool_name}: {e}")
             return
 
-        match = next((t for t in target_tools if t["tool_name"] == tool_name), None)
+        with lock:
+            match = target_by_name.get(tool_name)
 
         if match is not None:
             tgt_tool_id = self._adopt(
-                match, export_data, result, tool_name, src_tool_id
+                match, export_data, result, tool_name, src_tool_id, lock
             )
         else:
             tgt_tool_id = self._create_fresh(
-                export_data, src_tool_id, tool_name, result
+                export_data, src_tool_id, tool_name, result, lock
             )
-            # Keep the local cache in sync so a downstream source tool
-            # with the same name (uncommon but legal) adopts this new
-            # row instead of trying to re-create it.
             if tgt_tool_id is not None:
-                target_tools.append({"tool_id": tgt_tool_id, "tool_name": tool_name})
+                with lock:
+                    target_by_name[tool_name] = {
+                        "tool_id": tgt_tool_id,
+                        "tool_name": tool_name,
+                    }
 
         if tgt_tool_id is None:
             return
 
-        self.ctx.remap.record("custom_tool", src_tool_id, tgt_tool_id)
+        with lock:
+            self.ctx.remap.record("custom_tool", src_tool_id, tgt_tool_id)
 
         if self.ctx.options.dry_run:
             return
@@ -133,8 +146,9 @@ class CustomToolPhase(Phase):
             )
         except Exception as e:
             logger.exception("Registry republish failed for tool %s: %s", tool_name, e)
-            result.failed += 1
-            result.errors.append(f"export {tool_name}: {e}")
+            with lock:
+                result.failed += 1
+                result.errors.append(f"export {tool_name}: {e}")
             return
 
         try:
@@ -147,16 +161,18 @@ class CustomToolPhase(Phase):
                 tool_name,
                 e,
             )
-            result.failed += 1
-            result.errors.append(f"registry remap lookup {tool_name}: {e}")
+            with lock:
+                result.failed += 1
+                result.errors.append(f"registry remap lookup {tool_name}: {e}")
             return
 
         if src_regs and tgt_regs:
-            self.ctx.remap.record(
-                "prompt_studio_registry",
-                src_regs[0]["prompt_registry_id"],
-                tgt_regs[0]["prompt_registry_id"],
-            )
+            with lock:
+                self.ctx.remap.record(
+                    "prompt_studio_registry",
+                    src_regs[0]["prompt_registry_id"],
+                    tgt_regs[0]["prompt_registry_id"],
+                )
 
     def _adopt(
         self,
@@ -165,6 +181,7 @@ class CustomToolPhase(Phase):
         result: PhaseResult,
         tool_name: str,
         src_tool_id: str,
+        lock: threading.Lock,
     ) -> str | None:
         if self.ctx.options.on_name_conflict == "abort":
             raise NameConflictError(
@@ -173,7 +190,8 @@ class CustomToolPhase(Phase):
 
         tgt_tool_id = match["tool_id"]
         if self.ctx.options.dry_run:
-            result.skipped += 1
+            with lock:
+                result.skipped += 1
             logger.info(
                 "[dry-run] would sync prompts into adopted tool '%s' src=%s -> tgt=%s",
                 tool_name,
@@ -186,11 +204,13 @@ class CustomToolPhase(Phase):
             self.ctx.target.sync_prompts(tgt_tool_id, export_data)
         except Exception as e:
             logger.exception("sync_prompts failed for tool %s: %s", tool_name, e)
-            result.failed += 1
-            result.errors.append(f"sync {tool_name}: {e}")
+            with lock:
+                result.failed += 1
+                result.errors.append(f"sync {tool_name}: {e}")
             return None
 
-        result.adopted += 1
+        with lock:
+            result.adopted += 1
         logger.info(
             "adopted tool '%s' src=%s -> tgt=%s (prompts re-synced)",
             tool_name,
@@ -205,9 +225,11 @@ class CustomToolPhase(Phase):
         src_tool_id: str,
         tool_name: str,
         result: PhaseResult,
+        lock: threading.Lock,
     ) -> str | None:
         if self.ctx.options.dry_run:
-            result.skipped += 1
+            with lock:
+                result.skipped += 1
             logger.info(
                 "[dry-run] would import tool '%s' src=%s", tool_name, src_tool_id
             )
@@ -215,22 +237,25 @@ class CustomToolPhase(Phase):
 
         adapter_ids = self._resolve_target_adapter_ids(src_tool_id, tool_name)
         if adapter_ids is None:
-            result.failed += 1
-            result.errors.append(
-                f"import {tool_name}: missing target adapter remap for default profile"
-            )
+            with lock:
+                result.failed += 1
+                result.errors.append(
+                    f"import {tool_name}: missing target adapter remap for default profile"
+                )
             return None
 
         try:
             tgt = self.ctx.target.import_project(export_data, adapter_ids=adapter_ids)
         except Exception as e:
             logger.exception("import_project failed for tool %s: %s", tool_name, e)
-            result.failed += 1
-            result.errors.append(f"import {tool_name}: {e}")
+            with lock:
+                result.failed += 1
+                result.errors.append(f"import {tool_name}: {e}")
             return None
 
         tgt_tool_id = tgt["tool_id"]
-        result.created += 1
+        with lock:
+            result.created += 1
         logger.info(
             "created tool '%s' src=%s -> tgt=%s (needs_adapter_config=%s)",
             tool_name,

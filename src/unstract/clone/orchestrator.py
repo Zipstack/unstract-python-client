@@ -12,6 +12,7 @@ entity type means: write a new ``Phase`` subclass and append it to
 from __future__ import annotations
 
 import logging
+import time
 
 from unstract.clone.client import PlatformClient
 from unstract.clone.context import CloneContext, CloneOptions, OrgEndpoint
@@ -81,20 +82,32 @@ def clone(
             ),
         )
 
+        run_started = time.perf_counter()
         for name, phase_cls in PHASES:
             if not opts.includes(name):
                 report.skipped_phases.append(name)
                 logger.info("Phase '%s' skipped (excluded)", name)
                 continue
             logger.info("=== Phase: %s ===", name)
+            phase_started = time.perf_counter()
             try:
                 phase_cls(ctx).run(report)
             except CloneError as e:
                 report.aborted = True
                 report.abort_reason = str(e)
                 logger.error("Phase '%s' aborted: %s", name, e)
+                # Stamp duration even on abort so the report reflects time spent.
+                report.get_phase(name).duration_s = time.perf_counter() - phase_started
                 break
+            else:
+                report.get_phase(name).duration_s = time.perf_counter() - phase_started
+                logger.info(
+                    "=== Phase '%s' done in %.2fs ===",
+                    name,
+                    report.get_phase(name).duration_s,
+                )
 
+        report.total_duration_s = time.perf_counter() - run_started
         report.remap_snapshot = ctx.remap.snapshot()
         return report
     finally:

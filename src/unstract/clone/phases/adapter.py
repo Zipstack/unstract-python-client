@@ -12,6 +12,7 @@ sees them.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 from unstract.clone.exceptions import NameConflictError
@@ -44,29 +45,38 @@ class AdapterPhase(Phase):
             return result
 
         logger.info("Found %d adapter(s) in source org", len(src_summaries))
-        for summary in src_summaries:
-            self._clone_one(summary, result)
+        self.parallel_map(
+            src_summaries,
+            lambda summary, lock: self._clone_one(summary, result, lock),
+        )
         return result
 
-    def _clone_one(self, summary: dict[str, Any], result: PhaseResult) -> None:
+    def _clone_one(
+        self, summary: dict[str, Any], result: PhaseResult, lock: threading.Lock
+    ) -> None:
         name = summary["adapter_name"]
         atype = summary["adapter_type"]
         src_id = summary["id"]
-        # List response omits adapter_metadata; fetch detail to pick it up.
         try:
             src = self.ctx.source.get_adapter(src_id)
         except Exception as e:
-            logger.exception("Failed to GET source adapter %s [%s] detail: %s", name, atype, e)
-            result.failed += 1
-            result.errors.append(f"GET source detail {name} [{atype}]: {e}")
+            logger.exception(
+                "Failed to GET source adapter %s [%s] detail: %s", name, atype, e
+            )
+            with lock:
+                result.failed += 1
+                result.errors.append(f"GET source detail {name} [{atype}]: {e}")
             return
 
         try:
             existing = self.ctx.target.list_adapters(name=name, adapter_type=atype)
         except Exception as e:
-            logger.exception("Failed to GET adapter %s [%s] on target: %s", name, atype, e)
-            result.failed += 1
-            result.errors.append(f"GET {name} [{atype}]: {e}")
+            logger.exception(
+                "Failed to GET adapter %s [%s] on target: %s", name, atype, e
+            )
+            with lock:
+                result.failed += 1
+                result.errors.append(f"GET {name} [{atype}]: {e}")
             return
 
         if existing:
@@ -75,14 +85,21 @@ class AdapterPhase(Phase):
                 raise NameConflictError(
                     f"adapter '{name}' [{atype}] already exists in target as {tgt['id']}"
                 )
-            result.adopted += 1
+            with lock:
+                result.adopted += 1
             logger.info(
                 "adopted adapter '%s' [%s] src=%s -> tgt=%s",
-                name, atype, src_id, tgt["id"],
+                name,
+                atype,
+                src_id,
+                tgt["id"],
             )
         elif self.ctx.options.dry_run:
-            result.skipped += 1
-            logger.info("[dry-run] would create adapter '%s' [%s] src=%s", name, atype, src_id)
+            with lock:
+                result.skipped += 1
+            logger.info(
+                "[dry-run] would create adapter '%s' [%s] src=%s", name, atype, src_id
+            )
             return
         else:
             payload = build_post_payload(src, self._writable)
@@ -90,13 +107,19 @@ class AdapterPhase(Phase):
                 tgt = self.ctx.target.create_adapter(payload)
             except Exception as e:
                 logger.exception("Failed to create adapter %s [%s]: %s", name, atype, e)
-                result.failed += 1
-                result.errors.append(f"create {name} [{atype}]: {e}")
+                with lock:
+                    result.failed += 1
+                    result.errors.append(f"create {name} [{atype}]: {e}")
                 return
-            result.created += 1
+            with lock:
+                result.created += 1
             logger.info(
                 "created adapter '%s' [%s] src=%s -> tgt=%s",
-                name, atype, src_id, tgt["id"],
+                name,
+                atype,
+                src_id,
+                tgt["id"],
             )
 
-        self.ctx.remap.record("adapter", src_id, tgt["id"])
+        with lock:
+            self.ctx.remap.record("adapter", src_id, tgt["id"])

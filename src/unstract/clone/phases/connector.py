@@ -20,6 +20,7 @@ connector-specific wrinkles:
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 from unstract.clone.exceptions import NameConflictError
@@ -52,11 +53,15 @@ class ConnectorPhase(Phase):
             return result
 
         logger.info("Found %d connector(s) in source org", len(src_summaries))
-        for summary in src_summaries:
-            self._clone_one(summary, result)
+        self.parallel_map(
+            src_summaries,
+            lambda summary, lock: self._clone_one(summary, result, lock),
+        )
         return result
 
-    def _clone_one(self, summary: dict[str, Any], result: PhaseResult) -> None:
+    def _clone_one(
+        self, summary: dict[str, Any], result: PhaseResult, lock: threading.Lock
+    ) -> None:
         name = summary["connector_name"]
         src_id = summary["id"]
 
@@ -64,26 +69,29 @@ class ConnectorPhase(Phase):
             src = self.ctx.source.get_connector(src_id)
         except Exception as e:
             logger.exception("Failed to GET source connector %s detail: %s", name, e)
-            result.failed += 1
-            result.errors.append(f"GET source detail {name}: {e}")
+            with lock:
+                result.failed += 1
+                result.errors.append(f"GET source detail {name}: {e}")
             return
 
-        # Empty metadata means the backend redacted it (auto-provisioned rows
-        # like Unstract Cloud Storage). We cannot reconstruct it on target.
         if not src.get("connector_metadata"):
             logger.info(
                 "skipping connector '%s' (src=%s, catalog=%s) — source returned no metadata",
-                name, src_id, src.get("connector_id"),
+                name,
+                src_id,
+                src.get("connector_id"),
             )
-            result.skipped += 1
+            with lock:
+                result.skipped += 1
             return
 
         try:
             existing = self.ctx.target.list_connectors(name=name)
         except Exception as e:
             logger.exception("Failed to GET connector %s on target: %s", name, e)
-            result.failed += 1
-            result.errors.append(f"GET {name}: {e}")
+            with lock:
+                result.failed += 1
+                result.errors.append(f"GET {name}: {e}")
             return
 
         if existing:
@@ -92,13 +100,17 @@ class ConnectorPhase(Phase):
                 raise NameConflictError(
                     f"connector '{name}' already exists in target as {tgt['id']}"
                 )
-            result.adopted += 1
+            with lock:
+                result.adopted += 1
             logger.info(
                 "adopted connector '%s' src=%s -> tgt=%s",
-                name, src_id, tgt["id"],
+                name,
+                src_id,
+                tgt["id"],
             )
         elif self.ctx.options.dry_run:
-            result.skipped += 1
+            with lock:
+                result.skipped += 1
             logger.info("[dry-run] would create connector '%s' src=%s", name, src_id)
             return
         else:
@@ -107,13 +119,18 @@ class ConnectorPhase(Phase):
                 tgt = self.ctx.target.create_connector(payload)
             except Exception as e:
                 logger.exception("Failed to create connector %s: %s", name, e)
-                result.failed += 1
-                result.errors.append(f"create {name}: {e}")
+                with lock:
+                    result.failed += 1
+                    result.errors.append(f"create {name}: {e}")
                 return
-            result.created += 1
+            with lock:
+                result.created += 1
             logger.info(
                 "created connector '%s' src=%s -> tgt=%s",
-                name, src_id, tgt["id"],
+                name,
+                src_id,
+                tgt["id"],
             )
 
-        self.ctx.remap.record("connector", src_id, tgt["id"])
+        with lock:
+            self.ctx.remap.record("connector", src_id, tgt["id"])

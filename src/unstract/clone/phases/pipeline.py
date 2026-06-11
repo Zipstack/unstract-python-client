@@ -30,6 +30,7 @@ _MIGRATABLE_TYPES: frozenset[str] = frozenset({"ETL", "TASK"})
 
 class PipelinePhase(Phase):
     name = "pipeline"
+    share_path_template = "pipeline/{id}/share/"
 
     def run(self, report: CloneReport) -> PhaseResult:
         result = report.get_phase(self.name)
@@ -147,6 +148,15 @@ class PipelinePhase(Phase):
 
         with lock:
             self.ctx.remap.record("pipeline", src_id, tgt["id"])
+        # List rows carry the share axes; detail fn is a safety net.
+        self.apply_share(
+            src=src,
+            tgt_id=tgt["id"],
+            label=name,
+            result=result,
+            lock=lock,
+            src_detail_fn=lambda: self.ctx.source.get_pipeline(src_id),
+        )
 
     def _warn_if_extra_source_keys(self, src_pipeline_id: str, name: str) -> None:
         try:

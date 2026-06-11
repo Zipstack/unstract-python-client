@@ -59,6 +59,7 @@ def _extract_adapter_name(value: Any) -> str | None:
 
 class CustomToolPhase(Phase):
     name = "custom_tool"
+    share_path_template = "prompt-studio/{id}/share/"
 
     def run(self, report: CloneReport) -> PhaseResult:
         result = report.get_phase(self.name)
@@ -147,6 +148,17 @@ class CustomToolPhase(Phase):
 
         with lock:
             self.ctx.remap.record("custom_tool", src_tool_id, tgt_tool_id)
+
+        # Neither the export blob nor list rows carry share axes —
+        # share state comes from the source detail.
+        self.apply_share(
+            src={},
+            tgt_id=tgt_tool_id,
+            label=tool_name,
+            result=result,
+            lock=lock,
+            src_detail_fn=lambda: self.ctx.source.get_custom_tool(src_tool_id),
+        )
 
         if self.ctx.options.dry_run:
             return
@@ -263,9 +275,7 @@ class CustomToolPhase(Phase):
             )
             return None
 
-        adapter_ids = self._resolve_target_adapter_ids(
-            default_profile, tool_name
-        )
+        adapter_ids = self._resolve_target_adapter_ids(default_profile, tool_name)
         if adapter_ids is None:
             with lock:
                 result.failed += 1

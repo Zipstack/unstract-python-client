@@ -23,6 +23,7 @@ from unstract.clone.phases import (
     ConnectorPhase,
     CustomToolPhase,
     FilesPhase,
+    GroupPhase,
     PipelinePhase,
     TagPhase,
     ToolInstancePhase,
@@ -35,12 +36,15 @@ from unstract.clone.report import CloneReport, Endpoint
 logger = logging.getLogger(__name__)
 
 # Strict dependency order. Each entry: (phase_name, phase_class).
-# Adapter, connector, tag are independent leaf phases. Downstream phases
-# (custom_tool, workflow, tool_instance, workflow_endpoint) land later
-# and consume the remap entries these produce. Pipeline + api_deployment
-# come last: both FK the workflow and api_deployment additionally
-# requires endpoints to be configured before the serializer accepts it.
+# Group runs first: every shareable phase consumes its remap entries when
+# replicating shared_groups. Adapter, connector, tag are independent leaf
+# phases. Downstream phases (custom_tool, workflow, tool_instance,
+# workflow_endpoint) land later and consume the remap entries these
+# produce. Pipeline + api_deployment come last: both FK the workflow and
+# api_deployment additionally requires endpoints to be configured before
+# the serializer accepts it.
 PHASES: list[tuple[str, type[Phase]]] = [
+    ("group", GroupPhase),
     ("adapter", AdapterPhase),
     ("connector", ConnectorPhase),
     ("tag", TagPhase),

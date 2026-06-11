@@ -12,8 +12,9 @@ Three top-level types:
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from unstract.clone.client import PlatformClient
@@ -53,6 +54,8 @@ class CloneOptions:
     max_file_size: int = DEFAULT_MAX_FILE_SIZE
     # Per-phase worker fan-out. 1 = sequential (no executor).
     concurrency: int = DEFAULT_CONCURRENCY
+    # Group phase: also add members (matched by email) to cloned groups.
+    clone_group_members: bool = False
 
     def includes(self, phase_name: str) -> bool:
         if self.include is not None and phase_name not in self.include:
@@ -107,3 +110,7 @@ class CloneContext:
     # Source prompt_registry_ids whose CustomTool was skipped; used to
     # cascade-skip dependent workflows downstream.
     skipped_custom_tool_registry_ids: set[str] = field(default_factory=set)
+    # Per-run memo for users/groups directory listings (sharing replication
+    # touches them once per endpoint, never per resource).
+    share_cache: dict[str, Any] = field(default_factory=dict)
+    share_cache_lock: threading.Lock = field(default_factory=threading.Lock)

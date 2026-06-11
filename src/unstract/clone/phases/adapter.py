@@ -26,6 +26,7 @@ ADAPTER_PATH = "adapter/"
 
 class AdapterPhase(Phase):
     name = "adapter"
+    share_path_template = "adapter/{id}/share/"
 
     def run(self, report: CloneReport) -> PhaseResult:
         result = report.get_phase(self.name)
@@ -123,3 +124,7 @@ class AdapterPhase(Phase):
 
         with lock:
             self.ctx.remap.record("adapter", src_id, tgt["id"])
+        # Source detail (fetched above) carries the share axes.
+        self.apply_share(
+            src=src, tgt_id=tgt["id"], label=name, result=result, lock=lock
+        )

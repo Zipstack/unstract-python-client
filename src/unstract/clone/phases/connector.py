@@ -43,6 +43,7 @@ def _has_oauth_tokens(metadata: dict[str, Any]) -> bool:
 
 class ConnectorPhase(Phase):
     name = "connector"
+    share_path_template = "connector/{id}/share/"
 
     def run(self, report: CloneReport) -> PhaseResult:
         result = report.get_phase(self.name)
@@ -157,3 +158,7 @@ class ConnectorPhase(Phase):
 
         with lock:
             self.ctx.remap.record("connector", src_id, tgt["id"])
+        # Source detail (fetched above) carries the share axes.
+        self.apply_share(
+            src=src, tgt_id=tgt["id"], label=name, result=result, lock=lock
+        )

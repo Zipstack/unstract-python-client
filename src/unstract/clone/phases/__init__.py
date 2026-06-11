@@ -13,6 +13,7 @@ from unstract.clone.phases.base import Phase
 from unstract.clone.phases.connector import ConnectorPhase
 from unstract.clone.phases.custom_tool import CustomToolPhase
 from unstract.clone.phases.files import FilesPhase
+from unstract.clone.phases.group import GroupPhase
 from unstract.clone.phases.pipeline import PipelinePhase
 from unstract.clone.phases.tag import TagPhase
 from unstract.clone.phases.tool_instance import ToolInstancePhase
@@ -25,6 +26,7 @@ __all__ = [
     "ConnectorPhase",
     "CustomToolPhase",
     "FilesPhase",
+    "GroupPhase",
     "Phase",
     "PipelinePhase",
     "TagPhase",

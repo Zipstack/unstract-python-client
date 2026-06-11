@@ -12,6 +12,7 @@ from typing import Any, TypeVar
 from unstract.clone.context import CloneContext
 from unstract.clone.exceptions import CloneError
 from unstract.clone.report import CloneReport, PhaseResult
+from unstract.clone.sharing import apply_share_state
 
 T = TypeVar("T")
 
@@ -22,6 +23,8 @@ logger = logging.getLogger(__name__)
 # either noise (silently overwritten) or a 400 (when a source-org value
 # doesn't validate against the target org). Strip them universally —
 # the phase OPTIONS schema covers the entity-specific writable subset.
+# ``shared_users`` stays stripped on create — share state is replicated
+# post-create instead (see sharing.py).
 SERVER_MANAGED: frozenset[str] = frozenset(
     {
         "id",
@@ -55,6 +58,9 @@ class Phase(ABC):
     """Abstract phase. One subclass per entity type."""
 
     name: str = ""
+    # Share endpoint template for shareable resource types, e.g.
+    # "adapter/{id}/share/" ({id} = target pk). None = not shareable.
+    share_path_template: str | None = None
 
     def __init__(self, ctx: CloneContext):
         self.ctx = ctx
@@ -63,6 +69,34 @@ class Phase(ABC):
     def run(self, report: CloneReport) -> PhaseResult:
         """Migrate all entities of this phase's type. Idempotent across runs."""
         raise NotImplementedError
+
+    def apply_share(
+        self,
+        *,
+        src: dict[str, Any],
+        tgt_id: str,
+        label: str,
+        result: PhaseResult,
+        lock: threading.Lock,
+        src_detail_fn: Callable[[], dict[str, Any]] | None = None,
+    ) -> None:
+        """Replicate ``src``'s share state onto the target entity.
+
+        Pass ``src_detail_fn`` when ``src`` may be a stripped list-row —
+        the helper fetches the detail only if a share axis is missing.
+        No-op for phases without ``share_path_template``; never raises.
+        """
+        if self.share_path_template is None:
+            return
+        apply_share_state(
+            self.ctx,
+            share_path=self.share_path_template.format(id=tgt_id),
+            entity_label=f"{self.name} '{label}'",
+            src=src,
+            result=result,
+            lock=lock,
+            src_detail_fn=src_detail_fn,
+        )
 
     def parallel_map(
         self,

@@ -22,6 +22,9 @@ class PhaseResult:
     skipped: int = 0
     failed: int = 0
     errors: list[str] = field(default_factory=list)
+    # Non-fatal anomalies (e.g. share-state members missing on target).
+    # Surfaced in the report but never affect counts or the exit code.
+    warnings: list[str] = field(default_factory=list)
     duration_s: float = 0.0
 
 
@@ -77,6 +80,7 @@ class CloneReport:
         )
         # Actionable summary first so it doesn't scroll past the table.
         self._render_failures_summary(console_print=console.print, rich=True)
+        self._render_warnings_summary(console_print=console.print, rich=True)
         self._render_endpoints(console.print)
         table = Table(title="Clone Report", header_style="bold cyan")
         table.add_column("Phase", style="bold", justify="left")
@@ -155,6 +159,7 @@ class CloneReport:
     def _render_plain(self) -> str:
         lines: list[str] = []
         self._render_failures_summary(console_print=lines.append, rich=False)
+        self._render_warnings_summary(console_print=lines.append, rich=False)
         lines.extend(["Clone Report", "=" * 60])
         self._render_endpoints(lines.append)
         header = (
@@ -204,6 +209,7 @@ class CloneReport:
                     "skipped": p.skipped,
                     "failed": p.failed,
                     "errors": list(p.errors),
+                    "warnings": list(p.warnings),
                     "duration_s": p.duration_s,
                 }
                 for p in self.phases
@@ -304,6 +310,36 @@ class CloneReport:
         shown = rows[: self._FAILURE_MAX_ROWS]
         for phase_name, err in shown:
             truncated = self._truncate(err, self._FAILURE_LINE_MAX_CHARS)
+            if rich:
+                console_print(
+                    f"  - [bold cyan]{phase_name}[/bold cyan]: {truncated}",
+                    highlight=False,
+                )
+            else:
+                console_print(f"  - {phase_name}: {truncated}")
+        remaining = len(rows) - len(shown)
+        if remaining > 0:
+            tail = f"  ... +{remaining} more — see logs"
+            if rich:
+                console_print(f"[dim]{tail}[/dim]")
+            else:
+                console_print(tail)
+
+    def _render_warnings_summary(self, console_print: Any, rich: bool) -> None:
+        rows: list[tuple[str, str]] = []
+        for p in self.phases:
+            for warning in p.warnings:
+                rows.append((p.name, warning))
+        if not rows:
+            return
+        header = "Warnings (non-fatal; operator follow-up may be needed)"
+        if rich:
+            console_print(f"[yellow]{header}:[/yellow]")
+        else:
+            console_print(f"{header}:")
+        shown = rows[: self._FAILURE_MAX_ROWS]
+        for phase_name, warning in shown:
+            truncated = self._truncate(warning, self._FAILURE_LINE_MAX_CHARS)
             if rich:
                 console_print(
                     f"  - [bold cyan]{phase_name}[/bold cyan]: {truncated}",

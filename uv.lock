@@ -799,14 +799,10 @@ wheels = [
 name = "unstract-client"
 source = { editable = "." }
 dependencies = [
-    { name = "requests" },
-    { name = "tenacity" },
-]
-
-[package.optional-dependencies]
-clone = [
     { name = "click" },
+    { name = "requests" },
     { name = "rich" },
+    { name = "tenacity" },
 ]
 
 [package.dev-dependencies]
@@ -841,12 +837,11 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "click", marker = "extra == 'clone'", specifier = ">=8.1" },
+    { name = "click", specifier = ">=8.1" },
     { name = "requests", specifier = ">=2.32.3" },
-    { name = "rich", marker = "extra == 'clone'", specifier = ">=13.7" },
+    { name = "rich", specifier = ">=13.7" },
     { name = "tenacity", specifier = ">=8.2.0" },
 ]
-provides-extras = ["clone"]
 
 [package.metadata.requires-dev]
 dev = [

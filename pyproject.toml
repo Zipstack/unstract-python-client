@@ -8,6 +8,8 @@ authors = [
 dependencies = [
     "requests>=2.32.3",
     "tenacity>=8.2.0",
+    "click>=8.1",
+    "rich>=13.7",
 ]
 requires-python = ">=3.11"
 readme = "README.md"
@@ -25,14 +27,8 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
-[project.optional-dependencies]
-clone = [
-    "click>=8.1",
-    "rich>=13.7",
-]
-
 [project.scripts]
-unstract-clone = "unstract.clone.cli:main"
+unstract = "unstract.cli:main"
 
 [build-system]
 requires = ["hatchling"]

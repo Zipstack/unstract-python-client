@@ -100,6 +100,56 @@ client = APIDeploymentsClient(
 The retry logic uses exponential backoff with full jitter and respects the `Retry-After` header on 429 responses.
 
 
+## Unstract CLI
+
+Installing `unstract-client` also provides the `unstract` command:
+
+```bash
+pip install unstract-client
+unstract --help
+```
+
+### `unstract clone`
+
+Clones an organization's resources to another org, on the same or a different
+deployment (e.g. promote **dev** → **QA** → **prod**). Covers adapters,
+connectors, workflows, pipelines, API deployments, Prompt Studio projects and
+their files, user groups, and sharing state (users matched by email, groups by
+name).
+
+Authenticates with each org admin's **Platform API key**; prefer the env vars
+so keys never land in shell history:
+
+```bash
+export UNSTRACT_SRC_PLATFORM_KEY="<source platform key>"
+export UNSTRACT_TGT_PLATFORM_KEY="<target platform key>"
+
+unstract clone \
+  --source-url https://dev.example.com --source-org org_dev123 \
+  --target-url https://qa.example.com --target-org org_qa456 \
+  --dry-run
+```
+
+Drop `--dry-run` to perform the clone.
+
+| Option | Description |
+|--------|-------------|
+| `--dry-run` | Plan only; nothing is written. |
+| `--include` / `--exclude` | Comma-separated phases to run / skip. |
+| `--on-name-conflict` | `adopt` (default) reuses like-named target resources; `abort` stops. |
+| `--clone-group-members` | Also add group members on target, matched by email. |
+| `--source-key` / `--target-key` | Platform API keys, if not set via env vars. |
+| `--api-prefix` | Backend URL prefix (default `api/v1`). |
+
+Re-runs are idempotent: existing target resources are adopted by name, so a
+failed run can be resumed by re-running the same command.
+
+| Exit code | Meaning |
+|------|---------|
+| `0` | Success. |
+| `1` | Completed with failures — see the printed report. |
+| `2` | Could not run (setup error or `--on-name-conflict=abort` collision). |
+
 ## Questions and Feedback
 
 On Slack, [join great conversations](https://join-slack.unstract.com/) around LLMs, their ecosystem and leveraging them to automate the previously unautomatable!

@@ -363,6 +363,31 @@ def test_frictionless_adapter_dependence_skips_tool_and_records_for_cascade():
     assert SRC_REG in ctx.skipped_custom_tool_registry_ids
 
 
+def test_never_exported_source_tool_skips_registry_republish():
+    """A source tool with no registry entry (e.g. an empty project — the
+    backend blocks exporting those) clones cleanly without republishing.
+    """
+    src = FakeClient()
+    tgt = FakeClient()
+    _preload_source_tool(src, "src-tool-x", "Empty Project")
+    del src.registries_by_tool["src-tool-x"]
+    src.export_blobs["src-tool-x"]["prompts"] = []
+    _seed_source_adapters(src)
+    _seed_target_adapters(tgt)
+    ctx = _ctx(src, tgt)
+
+    result = CustomToolPhase(ctx).run(CloneReport())
+
+    assert result.created == 1
+    assert result.failed == 0
+    # No registry on source → republish must not fire (it would hit the
+    # backend's empty-project export guard).
+    assert tgt.export_tool_calls == []
+    # Tool remap still recorded; registry remap absent.
+    assert ctx.remap.resolve("custom_tool", "src-tool-x") is not None
+    assert ctx.remap.resolve("prompt_studio_registry", SRC_REG) is None
+
+
 def test_missing_target_adapter_fails_tool_cleanly():
     src = FakeClient()
     tgt = FakeClient()

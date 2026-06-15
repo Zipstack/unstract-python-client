@@ -29,6 +29,7 @@ API_DEPLOYMENT_PATH = "api/deployment/"
 
 class APIDeploymentPhase(Phase):
     name = "api_deployment"
+    share_path_template = "api/deployment/{id}/share/"
 
     def run(self, report: CloneReport) -> PhaseResult:
         result = report.get_phase(self.name)
@@ -150,6 +151,15 @@ class APIDeploymentPhase(Phase):
 
         with lock:
             self.ctx.remap.record("api_deployment", src_id, tgt["id"])
+        # List rows omit the share axes — fetch source detail when needed.
+        self.apply_share(
+            src=src,
+            tgt_id=tgt["id"],
+            label=api_name,
+            result=result,
+            lock=lock,
+            src_detail_fn=lambda: self.ctx.source.get_api_deployment(src_id),
+        )
 
     def _warn_if_extra_source_keys(self, src_deployment_id: str, name: str) -> None:
         try:

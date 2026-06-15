@@ -1,9 +1,12 @@
 """Click-based CLI for ``unstract.clone``.
 
-Single ``clone`` command. Platform keys can be passed via flags
-(``--source-key`` / ``--target-key``) or env vars
-(``UNSTRACT_SRC_PLATFORM_KEY`` / ``UNSTRACT_TGT_PLATFORM_KEY``) — env vars
-are preferred so the key never lands in shell history.
+Single ``clone`` command, registered on the top-level ``unstract`` group
+(``unstract.cli``) — the canonical invocation is ``unstract clone``. The
+local group here only backs ``python -m unstract.clone``.
+
+Platform keys can be passed via flags (``--source-key`` / ``--target-key``)
+or env vars (``UNSTRACT_SRC_PLATFORM_KEY`` / ``UNSTRACT_TGT_PLATFORM_KEY``)
+— env vars are preferred so the key never lands in shell history.
 """
 
 from __future__ import annotations
@@ -141,6 +144,12 @@ def cli() -> None:
     show_default=True,
     help="Per-phase worker count. 1 = strictly sequential.",
 )
+@click.option(
+    "--clone-group-members",
+    is_flag=True,
+    help="Also add group members on target, matched by email. "
+    "Members missing on target are skipped and reported.",
+)
 @click.option("-v", "--verbose", is_flag=True, help="Debug logging")
 def clone_cmd(
     source_url: str,
@@ -158,6 +167,7 @@ def clone_cmd(
     max_file_size: str,
     skip_files: bool,
     concurrency: int,
+    clone_group_members: bool,
     verbose: bool,
 ) -> None:
     """Clone configured resources from one org to another."""
@@ -178,6 +188,7 @@ def clone_cmd(
         file_strategy=effective_strategy,
         max_file_size=cap_bytes if cap_bytes is not None else DEFAULT_MAX_FILE_SIZE,
         concurrency=concurrency,
+        clone_group_members=clone_group_members,
     )
 
     source = OrgEndpoint(

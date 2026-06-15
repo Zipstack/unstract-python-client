@@ -113,6 +113,39 @@ class PlatformClient:
         self._post_schema_cache[entity_path] = writable
         return writable
 
+    # ----- org users & groups -----
+
+    def list_users(self) -> list[dict[str, Any]]:
+        """List org member rows (each carries ``id`` and ``email``)."""
+        result = self._request("GET", "users/")
+        return (result or {}).get("members", [])
+
+    def list_groups(self) -> list[dict[str, Any]]:
+        """List org groups; no server-side name filter — callers match in memory."""
+        result = self._request("GET", "groups/")
+        return result if isinstance(result, list) else (result or {}).get("results", [])
+
+    def create_group(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create a group; response has no ``id`` — re-list to learn the pk."""
+        return self._request("POST", "groups/", json=payload)
+
+    def list_group_members(self, group_id: Any) -> list[dict[str, Any]]:
+        """List a group's member rows (each carries ``email``)."""
+        result = self._request("GET", f"groups/{group_id}/members/")
+        return result if isinstance(result, list) else result.get("results", [])
+
+    def add_group_members(self, group_id: Any, user_ids: list[int]) -> Any:
+        """Bulk-add members by user pk; idempotent server-side."""
+        return self._request(
+            "POST", f"groups/{group_id}/members/", json={"user_ids": user_ids}
+        )
+
+    # ----- sharing -----
+
+    def share_resource(self, share_path: str, payload: dict[str, Any]) -> Any:
+        """Replace-style share update; axes omitted from ``payload`` are untouched."""
+        return self._request("POST", share_path, json=payload)
+
     # ----- adapters -----
 
     def list_adapters(

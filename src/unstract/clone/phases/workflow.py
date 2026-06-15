@@ -31,6 +31,7 @@ WORKFLOW_PATH = "workflow/"
 
 class WorkflowPhase(Phase):
     name = "workflow"
+    share_path_template = "workflow/{id}/share/"
 
     def run(self, report: CloneReport) -> PhaseResult:
         result = report.get_phase(self.name)
@@ -133,9 +134,7 @@ class WorkflowPhase(Phase):
             try:
                 src_detail = self.ctx.source.get_workflow(src_id)
             except Exception as e:
-                logger.exception(
-                    "Failed to GET source workflow %s detail: %s", name, e
-                )
+                logger.exception("Failed to GET source workflow %s detail: %s", name, e)
                 with lock:
                     result.failed += 1
                     result.errors.append(f"GET source detail {name}: {e}")
@@ -158,3 +157,12 @@ class WorkflowPhase(Phase):
 
         with lock:
             self.ctx.remap.record("workflow", src_id, tgt["id"])
+        # List rows carry the share axes; detail fn is a safety net.
+        self.apply_share(
+            src=src,
+            tgt_id=tgt["id"],
+            label=name,
+            result=result,
+            lock=lock,
+            src_detail_fn=lambda: self.ctx.source.get_workflow(src_id),
+        )

@@ -18,6 +18,8 @@ For each source tool the phase:
 5. Republishes ``PromptStudioRegistry`` via the export action and
    records the ``custom_tool`` + ``prompt_studio_registry`` remaps so
    downstream ToolInstancePhase can rewrite ``ToolInstance.tool_id``.
+   Skipped for tools with no source registry entry (never exported —
+   e.g. empty projects, which the backend refuses to export).
 
 Adapter id discovery for the fresh path needs all four of LLM,
 vector_db, embedding, x2text. If any source adapter can't be resolved
@@ -59,6 +61,7 @@ def _extract_adapter_name(value: Any) -> str | None:
 
 class CustomToolPhase(Phase):
     name = "custom_tool"
+    share_path_template = "prompt-studio/{id}/share/"
 
     def run(self, report: CloneReport) -> PhaseResult:
         result = report.get_phase(self.name)
@@ -148,7 +151,42 @@ class CustomToolPhase(Phase):
         with lock:
             self.ctx.remap.record("custom_tool", src_tool_id, tgt_tool_id)
 
+        # Neither the export blob nor list rows carry share axes —
+        # share state comes from the source detail.
+        self.apply_share(
+            src={},
+            tgt_id=tgt_tool_id,
+            label=tool_name,
+            result=result,
+            lock=lock,
+            src_detail_fn=lambda: self.ctx.source.get_custom_tool(src_tool_id),
+        )
+
         if self.ctx.options.dry_run:
+            return
+
+        # Tools never exported on source (e.g. empty projects — backend
+        # blocks their export) have no registry entry and no workflow
+        # references; republishing would fail the same backend guard.
+        try:
+            src_regs = self.ctx.source.list_registries(custom_tool=src_tool_id)
+        except Exception as e:
+            logger.warning(
+                "source registry lookup failed for tool '%s' "
+                "(downstream ToolInstance clone may skip): %s",
+                tool_name,
+                e,
+            )
+            with lock:
+                result.failed += 1
+                result.errors.append(f"registry remap lookup {tool_name}: {e}")
+            return
+
+        if not src_regs:
+            logger.info(
+                "tool '%s' was never exported on source; skipping registry republish",
+                tool_name,
+            )
             return
 
         try:
@@ -164,11 +202,10 @@ class CustomToolPhase(Phase):
             return
 
         try:
-            src_regs = self.ctx.source.list_registries(custom_tool=src_tool_id)
             tgt_regs = self.ctx.target.list_registries(custom_tool=tgt_tool_id)
         except Exception as e:
             logger.warning(
-                "registry remap lookup failed for tool '%s' "
+                "target registry lookup failed for tool '%s' "
                 "(downstream ToolInstance clone may skip): %s",
                 tool_name,
                 e,
@@ -263,9 +300,7 @@ class CustomToolPhase(Phase):
             )
             return None
 
-        adapter_ids = self._resolve_target_adapter_ids(
-            default_profile, tool_name
-        )
+        adapter_ids = self._resolve_target_adapter_ids(default_profile, tool_name)
         if adapter_ids is None:
             with lock:
                 result.failed += 1

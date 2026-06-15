@@ -46,15 +46,22 @@ def _cached(ctx: CloneContext, key: str, build: Callable[[], Any]) -> Any:
     with ctx.share_cache_lock:
         if key in ctx.share_cache:
             return ctx.share_cache[key]
-    # Build outside the lock (HTTP call); worst case two threads race and
-    # one result wins — the listings are read-only so that's harmless.
+    # Build outside the lock (HTTP call). Two threads may race; the merge
+    # below keeps a real result over a failure sentinel (listings are
+    # read-only, so two successes are interchangeable).
     try:
         value = build()
     except Exception as e:
         logger.warning("share replication: %s listing failed: %s", key, e)
         value = _FETCH_FAILED
     with ctx.share_cache_lock:
-        ctx.share_cache.setdefault(key, value)
+        # Prefer a real result if we raced: a cached failure must not shadow a
+        # peer's success, else share replication silently no-ops for the run.
+        cached = ctx.share_cache.get(key, _FETCH_FAILED)
+        if key not in ctx.share_cache or (
+            cached is _FETCH_FAILED and value is not _FETCH_FAILED
+        ):
+            ctx.share_cache[key] = value
         return ctx.share_cache[key]
 
 

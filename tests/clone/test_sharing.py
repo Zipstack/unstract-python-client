@@ -13,7 +13,7 @@ import threading
 from unstract.clone.context import CloneContext, CloneOptions, RemapTable
 from unstract.clone.phases.base import build_post_payload
 from unstract.clone.report import PhaseResult
-from unstract.clone.sharing import apply_share_state
+from unstract.clone.sharing import _FETCH_FAILED, _cached, apply_share_state
 
 
 class FakeClient:
@@ -206,6 +206,29 @@ def test_share_users_listing_caches_across_resources():
 
     assert len(src_calls) == 1  # memoised per run, not per resource
     assert len(tgt_client.share_posts) == 2
+
+
+def test_cached_failure_does_not_shadow_a_raced_success():
+    # A peer thread committing _FETCH_FAILED mid-build must not shadow our
+    # success, else share replication silently no-ops for the rest of the run.
+    ctx = _ctx(FakeClient(), FakeClient())
+
+    def build_while_peer_fails():
+        ctx.share_cache["k"] = _FETCH_FAILED  # racing thread commits first
+        return {"ok": 1}
+
+    assert _cached(ctx, "k", build_while_peer_fails) == {"ok": 1}
+    assert ctx.share_cache["k"] == {"ok": 1}
+
+
+def test_cached_success_is_not_overwritten_by_a_raced_failure():
+    ctx = _ctx(FakeClient(), FakeClient())
+
+    def build_fails_while_peer_succeeds():
+        ctx.share_cache["k"] = {"ok": 1}  # racing thread commits success first
+        raise RuntimeError("down")
+
+    assert _cached(ctx, "k", build_fails_while_peer_succeeds) == {"ok": 1}
 
 
 def test_share_post_failure_lands_in_errors():

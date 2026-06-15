@@ -123,7 +123,7 @@ class PlatformClient:
     def list_groups(self) -> list[dict[str, Any]]:
         """List org groups; no server-side name filter — callers match in memory."""
         result = self._request("GET", "groups/")
-        return result if isinstance(result, list) else result.get("results", [])
+        return result if isinstance(result, list) else (result or {}).get("results", [])
 
     def create_group(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Create a group; response has no ``id`` — re-list to learn the pk."""

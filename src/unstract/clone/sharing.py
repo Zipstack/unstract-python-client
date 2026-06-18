@@ -145,7 +145,7 @@ def _build_share_payload(
                 f"{len(src_group_ids)} group share(s) not replicated"
             )
         else:
-            mapped_groups: list[int] = []
+            mapped_groups: list[Any] = []
             for gid in src_group_ids:
                 tgt_gid = ctx.remap.resolve("group", str(gid))
                 if tgt_gid is None:
@@ -154,7 +154,11 @@ def _build_share_payload(
                         "target mapping — skipped"
                     )
                 else:
-                    mapped_groups.append(int(tgt_gid))
+                    # Real group pks are ints; dry-run planned remaps are
+                    # synthetic uuids (never POSTed) — keep those as-is.
+                    mapped_groups.append(
+                        int(tgt_gid) if str(tgt_gid).isdigit() else tgt_gid
+                    )
             payload["shared_groups"] = mapped_groups
     elif src_group_ids:
         group_warnings.append(

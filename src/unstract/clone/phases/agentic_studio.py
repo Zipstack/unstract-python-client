@@ -28,11 +28,8 @@ Per source project:
    registry are left unexported.
 
 Org-level ``AgenticSetting`` rows (global key/value, no project FK) are cloned
-once as a flat adopt-by-key / create pass.
-
-# ponytail: settings are org-global singletons keyed by a globally-unique
-# ``key`` — not the per-project config the brief described (that config lives
-# on the project itself). They're cloned flatly here, not per project.
+once as a flat adopt-by-key / create pass — they are org singletons, not
+per-project config.
 """
 
 from __future__ import annotations
@@ -222,10 +219,10 @@ class AgenticStudioPhase(Phase):
         # The project list/detail share the same serializer, so the source row
         # already carries shared_users (target-mappable user pks), shared_to_org
         # and created_by — no detail fetch needed.
-        # ponytail: agentic group sharing is deferred — shared_groups is
-        # polymorphic/read-only on the project serializer (share via the detail
-        # PATCH only reaches shared_users + shared_to_org), so include_groups is
-        # off and a source group share yields a single warning.
+        # Group sharing isn't replicated: shared_groups is polymorphic/read-only
+        # on the project serializer (the detail PATCH only reaches shared_users +
+        # shared_to_org), so include_groups is off and a source group share
+        # yields a single warning.
         replicate_share(
             self.ctx,
             apply_fn=lambda p: self.ctx.target.update_agentic_project_share(
@@ -414,7 +411,7 @@ class AgenticStudioPhase(Phase):
             return
 
         if not src_regs:
-            # ponytail: nothing to republish — project was never exported.
+            # Nothing to republish — project was never exported.
             return
 
         try:

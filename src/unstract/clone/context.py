@@ -152,8 +152,8 @@ class CloneContext:
     def feature_present(self, client: "PlatformClient", path: str) -> bool:
         """Is ``path`` (a feature's list endpoint) installed on ``client``?
 
-        Memoised per run. # ponytail: plain dict, no lock — probing runs in
-        the single-threaded orchestrator loop, before any parallel_map fan-out.
+        Memoised per run. Plain dict, no lock — probing runs in the
+        single-threaded orchestrator loop, before any parallel_map fan-out.
         """
         key = (id(client), path)
         cached = self.probe_cache.get(key)

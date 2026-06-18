@@ -428,10 +428,10 @@ class LookupsPhase(Phase):
             name, src_lookup_id, tgt_lookup_id, src_version_id, detail, result, lock
         )
 
-        # ponytail: assignment_values_snapshot is derived by the backend at
-        # publish time from then-existing assignments; we publish before
-        # assignments are recreated, so historical snapshots may differ from
-        # source. Structure + pinning reproduce; frozen values are best-effort.
+        # assignment_values_snapshot is derived by the backend at publish time
+        # from then-existing assignments; publishing happens before assignments
+        # are recreated, so historical snapshots may differ from source.
+        # Structure + pinning reproduce; frozen values are best-effort.
         try:
             published = self.ctx.target.publish_lookup_version(
                 tgt_lookup_id,

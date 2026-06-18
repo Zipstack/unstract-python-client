@@ -145,11 +145,11 @@ class CustomToolPhase(Phase):
                         "tool_name": tool_name,
                     }
 
+        # Each sub-path (adopt / fresh / fresh-dry-run) owns its own
+        # custom_tool remap, since only it knows whether the target id is
+        # real or a planned synthetic.
         if tgt_tool_id is None:
             return
-
-        with lock:
-            self.ctx.remap.record("custom_tool", src_tool_id, tgt_tool_id)
 
         # Neither the export blob nor list rows carry share axes —
         # share state comes from the source detail.
@@ -269,6 +269,7 @@ class CustomToolPhase(Phase):
         if self.ctx.options.dry_run:
             with lock:
                 result.adopted += 1
+                self.ctx.remap.record("custom_tool", src_tool_id, tgt_tool_id)
             logger.info(
                 "[dry-run] would sync prompts into adopted tool '%s' src=%s -> tgt=%s",
                 tool_name,
@@ -288,6 +289,7 @@ class CustomToolPhase(Phase):
 
         with lock:
             result.adopted += 1
+            self.ctx.remap.record("custom_tool", src_tool_id, tgt_tool_id)
         logger.info(
             "adopted tool '%s' src=%s -> tgt=%s (prompts re-synced)",
             tool_name,
@@ -356,6 +358,7 @@ class CustomToolPhase(Phase):
         tgt_tool_id = tgt["tool_id"]
         with lock:
             result.created += 1
+            self.ctx.remap.record("custom_tool", src_tool_id, tgt_tool_id)
         logger.info(
             "created tool '%s' src=%s -> tgt=%s (needs_adapter_config=%s)",
             tool_name,

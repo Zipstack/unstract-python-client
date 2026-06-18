@@ -401,14 +401,30 @@ class ManualReviewPhase(Phase):
             logger.info("[dry-run] would recreate %d review api key(s)", len(src_keys))
             return
 
-        # The api_key secret is server-minted and non-copyable; recreating
-        # yields a NEW secret, so external consumers must be re-wired.
-        result.warnings.append(
-            f"{len(src_keys)} review API key(s) recreated with freshly minted "
-            "secrets — the original key values cannot be copied; re-wire any "
-            "external consumers to the new keys"
-        )
+        # ReviewApiKey has no cross-org natural key (api_key is server-minted),
+        # so adopt by (class_name, description) to stay idempotent on re-runs.
+        try:
+            tgt_keys = self.ctx.target.list_review_api_keys()
+        except Exception as e:
+            logger.exception(
+                "manual_review: failed to list target review api keys: %s", e
+            )
+            result.failed += 1
+            result.errors.append(f"list target review_api_keys: {e}")
+            return
+        existing = {
+            (k.get("class_name"), k.get("description")) for k in tgt_keys
+        }
+
+        recreated = 0
         for src in src_keys:
+            if (src.get("class_name"), src.get("description")) in existing:
+                result.adopted += 1
+                logger.info(
+                    "adopted review api key class=%s (already present)",
+                    src.get("class_name"),
+                )
+                continue
             payload = {
                 k: src[k]
                 for k in ("class_name", "description", "is_active")
@@ -424,4 +440,14 @@ class ManualReviewPhase(Phase):
                 result.errors.append(f"create review_api_key: {e}")
                 continue
             result.created += 1
-        logger.info("recreated %d review api key(s) on target", len(src_keys))
+            recreated += 1
+
+        # The api_key secret is server-minted and non-copyable; newly created
+        # keys get a NEW secret, so external consumers must be re-wired.
+        if recreated:
+            result.warnings.append(
+                f"{recreated} review API key(s) recreated with freshly minted "
+                "secrets — the original key values cannot be copied; re-wire any "
+                "external consumers to the new keys"
+            )
+        logger.info("recreated %d review api key(s) on target", recreated)

@@ -303,7 +303,9 @@ class LookupsPhase(Phase):
         """Reproduce the source's published versions on the target in
         ``version_number`` order: set the target draft to each version's
         content + files, then publish. Records a ``lookup_version`` remap per
-        published version so its pinned assignments resolve.
+        published version so its pinned assignments resolve. A target version
+        with the same ``version_name`` is adopted (no re-publish) so re-runs
+        and adopted definitions stay idempotent.
         """
         try:
             versions = self.ctx.source.list_lookup_versions(src_lookup_id)
@@ -316,11 +318,41 @@ class LookupsPhase(Phase):
                 )
             return
 
+        # Existing target versions — re-publishing a name that already exists
+        # would error or duplicate history; adopt those instead.
+        try:
+            tgt_versions = self.ctx.target.list_lookup_versions(tgt_lookup_id)
+        except Exception as e:
+            logger.warning(
+                "lookup '%s': target version listing failed: %s", name, e
+            )
+            tgt_versions = []
+        tgt_by_name: dict[str, str] = {
+            v["version_name"]: str(v["version_id"])
+            for v in tgt_versions
+            if v.get("version_name") and v.get("version_id")
+        }
+
         published = sorted(
             (v for v in versions if not v.get("is_draft")),
             key=lambda v: v.get("version_number") or 0,
         )
         for v in published:
+            existing_id = tgt_by_name.get(v.get("version_name"))
+            if existing_id is not None:
+                src_version_id = v.get("version_id")
+                with lock:
+                    result.adopted += 1
+                    if src_version_id:
+                        self.ctx.remap.record(
+                            "lookup_version", str(src_version_id), existing_id
+                        )
+                logger.info(
+                    "lookup '%s': adopted published version '%s' (already present)",
+                    name,
+                    v.get("version_name"),
+                )
+                continue
             self._replay_one_version(
                 name, src_lookup_id, tgt_lookup_id, v, result, lock
             )
@@ -825,5 +857,8 @@ class LookupsPhase(Phase):
             logger.warning("target lookup %s draft fetch failed: %s", tgt_lookup_id, e)
             draft_id = None
         with lock:
-            draft_cache[tgt_lookup_id] = draft_id
-        return draft_id
+            # A racing peer may have already cached a valid id; the GET is
+            # read-only so a real id always wins over this thread's failure.
+            if draft_cache.get(tgt_lookup_id) is None:
+                draft_cache[tgt_lookup_id] = draft_id
+            return draft_cache[tgt_lookup_id]

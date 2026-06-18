@@ -249,6 +249,22 @@ def test_review_api_key_recreated_with_warning():
     assert any("re-wire any external consumers" in w for w in result.warnings)
 
 
+def test_review_api_key_adopted_on_rerun():
+    # Target already carries a key with the same (class_name, description):
+    # re-run must adopt, not create a duplicate or re-warn.
+    key = {"class_name": "invoices", "description": "d", "is_active": True}
+    src = FakeClient(workflows=[], api_keys=[{"id": "k1", "api_key": "s", **key}])
+    tgt = FakeClient(api_keys=[{"id": "t1", "api_key": "other", **key}])
+    ctx = _ctx(src, tgt, remap=RemapTable())
+    report = CloneReport()
+
+    result = ManualReviewPhase(ctx).run(report)
+
+    assert tgt.created_api_keys == []
+    assert result.adopted >= 1
+    assert not any("re-wire any external consumers" in w for w in result.warnings)
+
+
 def test_dry_run_plans_without_writing():
     src = FakeClient(
         workflows=[{"id": "src-wf", "workflow_name": "WF"}],

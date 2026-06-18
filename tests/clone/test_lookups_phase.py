@@ -460,6 +460,66 @@ def test_published_version_replayed_publishes_in_order_and_records_remap():
     assert remap.resolve("lookup_version", "src-v2") is not None
 
 
+def test_published_version_adopted_on_rerun_no_republish():
+    # Target already has a same-name definition with the same published version
+    # names: re-run must adopt them (no re-publish) and still record remaps.
+    src = FakeClient(
+        lookups=[_src_lookup("src-lk", "Vendors")],
+        details={"src-lk": _src_detail("Current draft", llm="src-llm")},
+        versions={
+            "src-lk": [
+                {
+                    "version_id": "src-v1",
+                    "is_draft": False,
+                    "version_name": "v1",
+                    "version_number": 1,
+                },
+            ]
+        },
+        version_details={
+            "src-v1": {
+                "version_id": "src-v1",
+                "is_draft": False,
+                "version_name": "v1",
+                "version_number": 1,
+                "prompt_template": "Frozen v1",
+                "adapters": {"llm": "src-llm", "x2text": None},
+                "files": [],
+            },
+        },
+    )
+    tgt = FakeClient(
+        lookups=[{"lookup_id": "tgt-lk", "name": "Vendors"}],
+        details={
+            "tgt-lk": {
+                "prompt_template": "",
+                "draft_version_id": "tgt-draft-lk",
+                "adapters": {"llm": None, "x2text": None},
+            }
+        },
+        versions={
+            "tgt-lk": [
+                {
+                    "version_id": "tgt-v1",
+                    "is_draft": False,
+                    "version_name": "v1",
+                    "version_number": 1,
+                },
+            ]
+        },
+    )
+    remap = RemapTable()
+    remap.record("adapter", "src-llm", "tgt-llm")
+    ctx = _ctx(src, tgt, remap=remap)
+    report = CloneReport()
+
+    LookupsPhase(ctx).run(report)
+
+    # Nothing re-published; remap points at the existing target version.
+    assert tgt.published_versions == []
+    assert remap.resolve("lookup_version", "src-v1") == "tgt-v1"
+
+
 def test_published_pinned_assignment_resolves_via_version_remap():
     src = _src_published_lookup()
     tgt = FakeClient()

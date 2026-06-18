@@ -94,9 +94,11 @@ def test_dry_run_makes_no_posts():
 
     result = TagPhase(ctx).run(report)
 
-    assert result.skipped == 1
-    assert result.created == 0
+    assert result.created == 1
+    assert result.skipped == 0
     assert tgt.posts == []
+    planned = ctx.remap.resolve("tag", "src-a")
+    assert planned is not None and ctx.remap.is_planned(planned)
 
 
 def test_abort_on_name_conflict_raises():

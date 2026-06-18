@@ -80,6 +80,23 @@ class WorkflowEndpointPhase(Phase):
                 result.errors.append(f"list src endpoints {src_wf_id}: {e}")
             return
 
+        # A planned (dry-run) workflow would be freshly created, and the
+        # backend auto-creates its SOURCE/DEST endpoints on create. They
+        # don't exist on target yet, so predict a patch per source endpoint
+        # without the live lookup against the synthetic id.
+        if self.ctx.options.dry_run and self.ctx.remap.is_planned(tgt_wf_id):
+            for src_ep in src_endpoints:
+                with lock:
+                    result.created += 1
+                    self.ctx.remap.record_planned("workflow_endpoint", src_ep["id"])
+                logger.info(
+                    "[dry-run] would PATCH %s endpoint on new workflow %s (src=%s)",
+                    src_ep["endpoint_type"],
+                    tgt_wf_id,
+                    src_ep["id"],
+                )
+            return
+
         try:
             tgt_endpoints = self.ctx.target.list_workflow_endpoints(
                 workflow_id=tgt_wf_id
@@ -124,17 +141,9 @@ class WorkflowEndpointPhase(Phase):
         tgt_ep_id = tgt_ep["id"]
         etype = src_ep["endpoint_type"]
 
-        if self.ctx.options.dry_run:
-            with lock:
-                result.skipped += 1
-            logger.info(
-                "[dry-run] would PATCH %s endpoint src=%s -> tgt=%s",
-                etype,
-                src_ep_id,
-                tgt_ep_id,
-            )
-            return
-
+        # Resolve the connector before the dry-run gate so the plan mirrors
+        # the real run's unmapped-connector skip (an unmapped connector is
+        # left out of both counts, not predicted as a patch).
         src_conn_id = _extract_connector_id(src_ep)
         tgt_conn_id: str | None = None
         if src_conn_id:
@@ -156,6 +165,19 @@ class WorkflowEndpointPhase(Phase):
                         f"src_connector={src_conn_id}"
                     )
                 return
+
+        if self.ctx.options.dry_run:
+            with lock:
+                result.created += 1
+                self.ctx.remap.record_planned("workflow_endpoint", src_ep_id)
+            logger.info(
+                "[dry-run] would PATCH %s endpoint src=%s -> tgt=%s (connector %s)",
+                etype,
+                src_ep_id,
+                tgt_ep_id,
+                tgt_conn_id,
+            )
+            return
 
         payload: dict[str, Any] = {
             "configuration": remap_uuids(

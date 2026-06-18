@@ -306,15 +306,21 @@ def test_dry_run_makes_no_writes():
     src = FakeClient()
     tgt = FakeClient()
     _preload_source_tool(src, "src-tool-x", "T")
+    _seed_source_adapters(src)
     _seed_target_adapters(tgt)
     ctx = _ctx(src, tgt, dry_run=True)
 
     result = CustomToolPhase(ctx).run(CloneReport())
 
-    assert result.skipped == 1
+    # Predicts the import (count matches a real run) without writing, and
+    # records a planned custom_tool remap so the files phase can plan.
+    assert result.created == 1
+    assert result.skipped == 0
     assert tgt.import_calls == []
     assert tgt.sync_calls == []
     assert tgt.export_tool_calls == []
+    planned = ctx.remap.resolve("custom_tool", "src-tool-x")
+    assert planned is not None and ctx.remap.is_planned(planned)
 
 
 def test_dry_run_on_adopt_path_does_not_republish_registry():
@@ -329,7 +335,9 @@ def test_dry_run_on_adopt_path_does_not_republish_registry():
 
     result = CustomToolPhase(ctx).run(CloneReport())
 
-    assert result.skipped == 1
+    # Adopt path counts as adopted (matching a real run).
+    assert result.adopted == 1
+    assert result.skipped == 0
     assert tgt.sync_calls == []
     assert tgt.import_calls == []
     # Critical regression: registry republish must NOT fire on dry-run.

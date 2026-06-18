@@ -124,7 +124,8 @@ class WorkflowPhase(Phase):
             )
         elif self.ctx.options.dry_run:
             with lock:
-                result.skipped += 1
+                result.created += 1
+                self.ctx.remap.record_planned("workflow", src_id)
             logger.info("[dry-run] would create workflow '%s' src=%s", name, src_id)
             return
         else:

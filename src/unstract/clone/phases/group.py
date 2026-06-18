@@ -75,7 +75,8 @@ class GroupPhase(Phase):
             logger.info("reusing group '%s' src=%s -> tgt=%s", name, src_id, tgt["id"])
         elif self.ctx.options.dry_run:
             with lock:
-                result.skipped += 1
+                result.created += 1
+                self.ctx.remap.record_planned("group", str(src_id))
             logger.info("[dry-run] would create group '%s' src=%s", name, src_id)
             if self.ctx.options.clone_group_members:
                 # Still computed so would-skip members show up in the report.

@@ -102,9 +102,11 @@ def test_dry_run_makes_no_posts():
 
     result = GroupPhase(ctx).run(CloneReport())
 
-    assert result.skipped == 1
+    assert result.created == 1
+    assert result.skipped == 0
     assert tgt.group_posts == []
-    assert ctx.remap.resolve("group", "1") is None
+    planned = ctx.remap.resolve("group", "1")
+    assert planned is not None and ctx.remap.is_planned(planned)
 
 
 def test_members_not_cloned_by_default():

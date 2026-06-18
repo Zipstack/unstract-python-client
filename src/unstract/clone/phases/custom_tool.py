@@ -145,11 +145,11 @@ class CustomToolPhase(Phase):
                         "tool_name": tool_name,
                     }
 
+        # Each sub-path (adopt / fresh / fresh-dry-run) owns its own
+        # custom_tool remap, since only it knows whether the target id is
+        # real or a planned synthetic.
         if tgt_tool_id is None:
             return
-
-        with lock:
-            self.ctx.remap.record("custom_tool", src_tool_id, tgt_tool_id)
 
         # Neither the export blob nor list rows carry share axes —
         # share state comes from the source detail.
@@ -163,6 +163,10 @@ class CustomToolPhase(Phase):
         )
 
         if self.ctx.options.dry_run:
+            # Can't republish the registry without writing, but ToolInstance
+            # needs a prompt_studio_registry remap to plan-count. Mirror it
+            # with a planned id derived from the source registry (read-only).
+            self._record_planned_registry(src_tool_id, tool_name, lock)
             return
 
         # Tools never exported on source (e.g. empty projects — backend
@@ -223,6 +227,30 @@ class CustomToolPhase(Phase):
                     tgt_regs[0]["prompt_registry_id"],
                 )
 
+    def _record_planned_registry(
+        self, src_tool_id: str, tool_name: str, lock: threading.Lock
+    ) -> None:
+        """Dry-run: record a planned prompt_studio_registry remap from the
+        source registry id, so ToolInstancePhase can resolve tool_id and
+        plan-count. No-op for tools never exported on source (no registry).
+        """
+        try:
+            src_regs = self.ctx.source.list_registries(custom_tool=src_tool_id)
+        except Exception as e:
+            logger.warning(
+                "[dry-run] source registry lookup failed for tool '%s' "
+                "(tool_instance plan may under-count): %s",
+                tool_name,
+                e,
+            )
+            return
+        if not src_regs:
+            return
+        with lock:
+            self.ctx.remap.record_planned(
+                "prompt_studio_registry", src_regs[0]["prompt_registry_id"]
+            )
+
     def _adopt(
         self,
         match: dict[str, Any],
@@ -240,7 +268,8 @@ class CustomToolPhase(Phase):
         tgt_tool_id = match["tool_id"]
         if self.ctx.options.dry_run:
             with lock:
-                result.skipped += 1
+                result.adopted += 1
+                self.ctx.remap.record("custom_tool", src_tool_id, tgt_tool_id)
             logger.info(
                 "[dry-run] would sync prompts into adopted tool '%s' src=%s -> tgt=%s",
                 tool_name,
@@ -260,6 +289,7 @@ class CustomToolPhase(Phase):
 
         with lock:
             result.adopted += 1
+            self.ctx.remap.record("custom_tool", src_tool_id, tgt_tool_id)
         logger.info(
             "adopted tool '%s' src=%s -> tgt=%s (prompts re-synced)",
             tool_name,
@@ -276,14 +306,9 @@ class CustomToolPhase(Phase):
         result: PhaseResult,
         lock: threading.Lock,
     ) -> str | None:
-        if self.ctx.options.dry_run:
-            with lock:
-                result.skipped += 1
-            logger.info(
-                "[dry-run] would import tool '%s' src=%s", tool_name, src_tool_id
-            )
-            return None
-
+        # Run the source-side validations even in dry-run — they decide
+        # whether a real run would create or frictionless-skip, so the plan
+        # counts must reflect them. Only the target-write steps are stubbed.
         default_profile = self._source_default_profile(src_tool_id, tool_name)
         if default_profile is None:
             with lock:
@@ -299,6 +324,18 @@ class CustomToolPhase(Phase):
                 src_tool_id, tool_name, invisible, result, lock
             )
             return None
+
+        if self.ctx.options.dry_run:
+            # Target adapter resolution is skipped: adapters this run would
+            # create don't exist on target yet, so it can't resolve. The
+            # frictionless check above already caught the real skip cases.
+            with lock:
+                result.created += 1
+                tgt_tool_id = self.ctx.remap.record_planned("custom_tool", src_tool_id)
+            logger.info(
+                "[dry-run] would import tool '%s' src=%s", tool_name, src_tool_id
+            )
+            return tgt_tool_id
 
         adapter_ids = self._resolve_target_adapter_ids(default_profile, tool_name)
         if adapter_ids is None:
@@ -321,6 +358,7 @@ class CustomToolPhase(Phase):
         tgt_tool_id = tgt["tool_id"]
         with lock:
             result.created += 1
+            self.ctx.remap.record("custom_tool", src_tool_id, tgt_tool_id)
         logger.info(
             "created tool '%s' src=%s -> tgt=%s (needs_adapter_config=%s)",
             tool_name,

@@ -15,6 +15,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from uuid import NAMESPACE_URL, uuid5
 
 if TYPE_CHECKING:
     from unstract.clone.client import PlatformClient
@@ -74,9 +75,29 @@ class RemapTable:
 
     def __init__(self) -> None:
         self._table: dict[str, dict[str, str]] = {}
+        # Synthetic target ids minted by record_planned() in dry-run. Tracked
+        # so the report can mask them — they are not real target ids.
+        self._planned: set[str] = set()
 
     def record(self, entity: str, src_uuid: str, tgt_uuid: str) -> None:
         self._table.setdefault(entity, {})[src_uuid] = tgt_uuid
+
+    def record_planned(self, entity: str, src_uuid: str) -> str:
+        """Dry-run only: record a deterministic synthetic target id so
+        dependent phases can resolve the FK and plan-count without writing.
+        Never reaches the wire, so the fake id stays in-memory scaffolding.
+        """
+        tgt_uuid = str(uuid5(NAMESPACE_URL, f"planned:{entity}:{src_uuid}"))
+        self.record(entity, src_uuid, tgt_uuid)
+        self._planned.add(tgt_uuid)
+        return tgt_uuid
+
+    def is_planned(self, tgt_uuid: str) -> bool:
+        """True if ``tgt_uuid`` is a dry-run synthetic id (no real row on
+        target). Callers use this to skip live target lookups that would
+        query a non-existent id.
+        """
+        return tgt_uuid in self._planned
 
     def resolve(self, entity: str, src_uuid: str) -> str | None:
         return self._table.get(entity, {}).get(src_uuid)
@@ -90,9 +111,19 @@ class RemapTable:
                 return hit
         return None
 
-    def snapshot(self) -> dict[str, dict[str, str]]:
-        """Read-only snapshot for the post-run report."""
-        return {entity: dict(m) for entity, m in self._table.items()}
+    def snapshot(self, *, hide_planned: bool = False) -> dict[str, dict[str, str]]:
+        """Read-only snapshot for the post-run report. ``hide_planned`` masks
+        dry-run synthetic ids (rendered as ``"(planned)"``) while keeping the
+        per-entity counts intact.
+        """
+
+        def _val(tgt: str) -> str:
+            return "(planned)" if hide_planned and tgt in self._planned else tgt
+
+        return {
+            entity: {src: _val(tgt) for src, tgt in m.items()}
+            for entity, m in self._table.items()
+        }
 
 
 @dataclass

@@ -126,18 +126,23 @@ class FilesPhase(Phase):
         report: CloneReport,
         result: PhaseResult,
     ) -> list[_FileTask]:
-        try:
-            tgt_docs = self.ctx.target.list_prompt_documents(tgt_tool_id)
-        except Exception as e:
-            logger.exception(
-                "files: failed to list target DM rows for tool %s: %s",
-                tool_name,
-                e,
-            )
-            result.failed += 1
-            result.errors.append(f"list target docs {tool_name}: {e}")
-            return []
-        target_names = {d["document_name"] for d in tgt_docs}
+        # A planned (dry-run) tool id has no row on target; skip the live
+        # lookup and treat every source file as missing → predicted upload.
+        if self.ctx.options.dry_run and self.ctx.remap.is_planned(tgt_tool_id):
+            target_names: set[str] = set()
+        else:
+            try:
+                tgt_docs = self.ctx.target.list_prompt_documents(tgt_tool_id)
+            except Exception as e:
+                logger.exception(
+                    "files: failed to list target DM rows for tool %s: %s",
+                    tool_name,
+                    e,
+                )
+                result.failed += 1
+                result.errors.append(f"list target docs {tool_name}: {e}")
+                return []
+            target_names = {d["document_name"] for d in tgt_docs}
 
         tasks: list[_FileTask] = []
         for doc in src_docs:
@@ -163,7 +168,7 @@ class FilesPhase(Phase):
                 )
                 continue
             if self.ctx.options.dry_run:
-                result.skipped += 1
+                result.created += 1
                 logger.info(
                     "[dry-run] files: would clone tool=%s file=%s",
                     tool_name,

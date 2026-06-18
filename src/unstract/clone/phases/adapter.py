@@ -97,7 +97,8 @@ class AdapterPhase(Phase):
             )
         elif self.ctx.options.dry_run:
             with lock:
-                result.skipped += 1
+                result.created += 1
+                self.ctx.remap.record_planned("adapter", src_id)
             logger.info(
                 "[dry-run] would create adapter '%s' [%s] src=%s", name, atype, src_id
             )

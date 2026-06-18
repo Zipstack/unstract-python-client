@@ -112,7 +112,8 @@ class APIDeploymentPhase(Phase):
             )
         elif self.ctx.options.dry_run:
             with lock:
-                result.skipped += 1
+                result.created += 1
+                self.ctx.remap.record_planned("api_deployment", src_id)
             logger.info(
                 "[dry-run] would create api_deployment '%s' src=%s", api_name, src_id
             )

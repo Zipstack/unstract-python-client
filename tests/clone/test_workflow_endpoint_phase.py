@@ -227,8 +227,36 @@ def test_dry_run_makes_no_patches():
 
     result = WorkflowEndpointPhase(ctx).run(CloneReport())
 
-    assert result.skipped == 1
+    # Endpoints count as `created` on a real PATCH; dry-run predicts that
+    # without writing, and records a planned remap.
+    assert result.created == 1
+    assert result.skipped == 0
     assert tgt.patch_calls == []
+    planned = ctx.remap.resolve("workflow_endpoint", "src-ep-source")
+    assert planned is not None and ctx.remap.is_planned(planned)
+
+
+def test_dry_run_planned_workflow_predicts_patch_without_target_lookup():
+    # Parent workflow would be freshly created (planned id), so its endpoints
+    # don't exist on target yet. The phase must predict a patch per source
+    # endpoint, not fail with "missing tgt endpoint".
+    src = FakeClient()
+    src.endpoints[SRC_WF] = [
+        _src_endpoint("src-ep-source", "SOURCE", SRC_CONN, {}),
+        _src_endpoint("src-ep-dest", "DESTINATION", SRC_CONN, {}),
+    ]
+    tgt = FakeClient()  # no endpoints for the planned workflow
+    remap = RemapTable()
+    planned_wf = remap.record_planned("workflow", SRC_WF)
+    remap.record("connector", SRC_CONN, TGT_CONN)
+    ctx = _ctx(src, tgt, remap=remap, dry_run=True)
+
+    result = WorkflowEndpointPhase(ctx).run(CloneReport())
+
+    assert result.created == 2
+    assert result.failed == 0
+    assert tgt.patch_calls == []
+    assert remap.is_planned(planned_wf)
 
 
 def test_no_workflows_in_remap_is_noop():

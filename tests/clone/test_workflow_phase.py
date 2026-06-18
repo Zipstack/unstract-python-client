@@ -145,15 +145,20 @@ def test_idempotent_rerun_adopts_existing_workflow():
     assert ctx.remap.resolve("workflow", "wf-src-1") == "wf-tgt-pre"
 
 
-def test_dry_run_creates_nothing():
+def test_dry_run_predicts_create_without_writing():
     src = FakeClient([_src("wf-src-1", "Invoice ETL")])
     tgt = FakeClient()
     ctx = _ctx(src, tgt, dry_run=True)
 
     result = WorkflowPhase(ctx).run(CloneReport())
 
-    assert result.skipped == 1
+    # Count matches a real run; nothing posted; planned remap recorded so
+    # downstream phases (tool_instance, endpoint, pipeline) can plan.
+    assert result.created == 1
+    assert result.skipped == 0
     assert tgt.posts == []
+    planned = ctx.remap.resolve("workflow", "wf-src-1")
+    assert planned is not None and ctx.remap.is_planned(planned)
 
 
 def test_abort_on_name_conflict_raises():

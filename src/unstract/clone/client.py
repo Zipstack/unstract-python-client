@@ -845,19 +845,6 @@ class PlatformClient:
         """Create an agentic project. Returns the created row (carries ``id``)."""
         return self._request("POST", "agentic/projects/", json=payload)
 
-    def update_agentic_project_share(
-        self, project_id: str, payload: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Replicate share state onto an agentic project via its detail PATCH.
-
-        ``payload`` carries ``shared_to_org`` + ``shared_users`` (target user
-        pks). ``shared_groups`` is polymorphic/read-only on this serializer and
-        is handled by the share helper's group-omission warning.
-        """
-        return self._request(
-            "PATCH", f"agentic/projects/{project_id}/", json=payload
-        )
-
     def list_agentic_prompt_versions(
         self, *, project_id: str | None = None
     ) -> list[dict[str, Any]]:

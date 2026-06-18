@@ -41,7 +41,7 @@ from typing import Any
 from unstract.clone.exceptions import NameConflictError
 from unstract.clone.phases.base import Phase, build_post_payload
 from unstract.clone.report import CloneReport, PhaseResult
-from unstract.clone.sharing import replicate_share
+from unstract.clone.sharing import apply_share_state
 
 logger = logging.getLogger(__name__)
 
@@ -216,23 +216,18 @@ class AgenticStudioPhase(Phase):
         result: PhaseResult,
         lock: threading.Lock,
     ) -> None:
-        # The project list/detail share the same serializer, so the source row
-        # already carries shared_users (target-mappable user pks), shared_to_org
-        # and created_by — no detail fetch needed.
-        # Group sharing isn't replicated: shared_groups is polymorphic/read-only
-        # on the project serializer (the detail PATCH only reaches shared_users +
-        # shared_to_org), so include_groups is off and a source group share
-        # yields a single warning.
-        replicate_share(
+        # The list row already carries shared_users / shared_groups /
+        # shared_to_org, so no detail fetch is needed. Share axes are read-only
+        # on the serializer (a detail PATCH is a silent no-op); they're written
+        # via the dedicated share action, which handles the polymorphic group
+        # axis too — so groups replicate like every other shared resource.
+        apply_share_state(
             self.ctx,
-            apply_fn=lambda p: self.ctx.target.update_agentic_project_share(
-                tgt_project_id, p
-            ),
+            share_path=f"agentic/projects/{tgt_project_id}/share/",
             entity_label=f"agentic project '{name}'",
             src=src,
             result=result,
             lock=lock,
-            include_groups=False,
         )
 
     # ----- prompt versions -----

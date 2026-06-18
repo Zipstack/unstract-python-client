@@ -79,9 +79,9 @@ class FakeClient:
         self.created_projects.append(new)
         return new
 
-    def update_agentic_project_share(self, project_id, payload):
-        self.shared_projects.append((project_id, payload))
-        return {"id": project_id, **payload}
+    def share_resource(self, share_path, payload):
+        self.shared_projects.append((share_path, payload))
+        return payload
 
     # ----- users (share replication) -----
 
@@ -403,14 +403,16 @@ def test_share_replicated_with_mapped_users_and_org_flag():
 
     tgt_pid = tgt.created_projects[0]["id"]
     assert len(tgt.shared_projects) == 1
-    pid, payload = tgt.shared_projects[0]
-    assert pid == tgt_pid
+    share_path, payload = tgt.shared_projects[0]
+    assert share_path == f"agentic/projects/{tgt_pid}/share/"
     assert payload["shared_to_org"] is True
     assert payload["shared_users"] == [42]  # owner dropped, alice remapped
-    assert "shared_groups" not in payload  # include_groups=False
+    assert payload["shared_groups"] == []  # no source groups, axis still sent
 
 
-def test_source_group_share_warns_without_failure():
+def test_source_group_share_replicated_via_remap():
+    # Group sharing IS supported on agentic projects (via the share action),
+    # so a source group share maps through the `group` remap onto the target.
     src = FakeClient(
         projects=[
             {
@@ -418,17 +420,18 @@ def test_source_group_share_warns_without_failure():
                 "name": "Receipts",
                 "description": "d",
                 "created_by": 1,
-                "shared_groups": [7],  # unsupported via the project PATCH
+                "shared_groups": [7],
             }
         ],
         users=[{"id": 1, "email": "owner@x.com"}],
     )
     tgt = FakeClient()
     ctx = _ctx(src, tgt)
+    ctx.remap.record("group", "7", "70")
 
     result = AgenticStudioPhase(ctx).run(CloneReport())
 
     assert result.failed == 0
-    assert sum("group share(s) not supported" in w for w in result.warnings) == 1
-    # No shareable axes remained, so no PATCH fires.
-    assert tgt.shared_projects == []
+    assert len(tgt.shared_projects) == 1
+    _, payload = tgt.shared_projects[0]
+    assert payload["shared_groups"] == [70]

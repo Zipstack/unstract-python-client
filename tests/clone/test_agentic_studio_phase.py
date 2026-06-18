@@ -346,6 +346,26 @@ def test_settings_create_and_adopt():
     assert result.adopted == 1
 
 
+def test_setting_global_key_collision_skips_not_fails():
+    # `key` is globally unique across orgs: a create can 500 on a key owned by
+    # another org that isn't in this org's listing. That's a warned skip, not a
+    # hard failure.
+    src = FakeClient(settings=[{"id": "src-s1", "key": "global-key", "value": "v"}])
+    tgt = FakeClient()
+
+    def _boom(payload):
+        raise RuntimeError("returned 500")
+
+    tgt.create_agentic_setting = _boom
+    ctx = _ctx(src, tgt)
+
+    result = AgenticStudioPhase(ctx).run(CloneReport())
+
+    assert result.failed == 0
+    assert result.skipped == 1
+    assert any("global-key" in w for w in result.warnings)
+
+
 def test_dry_run_plans_without_writing():
     src = FakeClient(
         projects=[_src_project("src-p", "Receipts")],

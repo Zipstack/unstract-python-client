@@ -529,6 +529,12 @@ class AgenticStudioPhase(Phase):
                     self.ctx.target.create_agentic_setting(payload)
                     result.created += 1
             except Exception as e:
-                logger.exception("agentic setting '%s' write failed: %s", key, e)
-                result.failed += 1
-                result.errors.append(f"agentic setting {key}: {e}")
+                # `key` is globally unique across orgs, so a create can collide
+                # with a row owned by another org that isn't in this org's
+                # listing — not data loss the clone can resolve. Warn, don't fail.
+                logger.warning("agentic setting '%s' not replicated: %s", key, e)
+                result.skipped += 1
+                result.warnings.append(
+                    f"agentic setting {key}: not replicated "
+                    f"(org-global key may already exist elsewhere): {e}"
+                )

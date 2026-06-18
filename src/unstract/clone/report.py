@@ -40,6 +40,7 @@ class Endpoint:
 class CloneReport:
     source: Endpoint | None = None
     target: Endpoint | None = None
+    dry_run: bool = False
     phases: list[PhaseResult] = field(default_factory=list)
     skipped_phases: list[str] = field(default_factory=list)
     remap_snapshot: dict[str, dict[str, str]] = field(default_factory=dict)
@@ -82,6 +83,11 @@ class CloneReport:
         self._render_failures_summary(console_print=console.print, rich=True)
         self._render_warnings_summary(console_print=console.print, rich=True)
         self._render_endpoints(console.print)
+        if self.dry_run:
+            console.print(
+                "[bold yellow]DRY RUN[/bold yellow] — nothing written; "
+                "counts are the predicted real run"
+            )
         table = Table(title="Clone Report", header_style="bold cyan")
         table.add_column("Phase", style="bold", justify="left")
         for col in ("Created", "Adopted", "Skipped", "Failed", "Time"):
@@ -162,6 +168,8 @@ class CloneReport:
         self._render_warnings_summary(console_print=lines.append, rich=False)
         lines.extend(["Clone Report", "=" * 60])
         self._render_endpoints(lines.append)
+        if self.dry_run:
+            lines.append("DRY RUN — nothing written; counts are the predicted real run")
         header = (
             f"{'Phase':<24}{'Created':>10}{'Adopted':>10}"
             f"{'Skipped':>10}{'Failed':>10}{'Time':>10}"
@@ -201,6 +209,7 @@ class CloneReport:
                 if self.target
                 else None
             ),
+            "dry_run": self.dry_run,
             "phases": [
                 {
                     "name": p.name,

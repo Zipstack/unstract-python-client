@@ -116,7 +116,8 @@ class PipelinePhase(Phase):
             )
         elif self.ctx.options.dry_run:
             with lock:
-                result.skipped += 1
+                result.created += 1
+                self.ctx.remap.record_planned("pipeline", src_id)
             logger.info("[dry-run] would create pipeline '%s' src=%s", name, src_id)
             return
         else:

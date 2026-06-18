@@ -84,6 +84,7 @@ def clone(
             target=Endpoint(
                 base_url=target.base_url, organization_id=target.organization_id
             ),
+            dry_run=opts.dry_run,
         )
 
         run_started = time.perf_counter()
@@ -112,7 +113,7 @@ def clone(
                 )
 
         report.total_duration_s = time.perf_counter() - run_started
-        report.remap_snapshot = ctx.remap.snapshot()
+        report.remap_snapshot = ctx.remap.snapshot(hide_planned=opts.dry_run)
         return report
     finally:
         src_client.close()

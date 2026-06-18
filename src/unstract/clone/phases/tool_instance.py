@@ -125,25 +125,31 @@ class ToolInstancePhase(Phase):
                 result.skipped += 1
             return
 
-        try:
-            existing = self.ctx.target.list_tool_instances(workflow_id=tgt_wf_id)
-        except Exception as e:
-            logger.exception(
-                "Failed to list target tool_instances for wf %s: %s", tgt_wf_id, e
-            )
-            with lock:
-                result.failed += 1
-                result.errors.append(f"list tgt tool_instances {tgt_wf_id}: {e}")
-            return
+        # A planned (dry-run) workflow id has no row on target; its
+        # tool_instance can't exist yet, so predict a create without the
+        # live lookup against a non-existent id.
+        if self.ctx.options.dry_run and self.ctx.remap.is_planned(tgt_wf_id):
+            existing: list[dict[str, Any]] = []
+        else:
+            try:
+                existing = self.ctx.target.list_tool_instances(workflow_id=tgt_wf_id)
+            except Exception as e:
+                logger.exception(
+                    "Failed to list target tool_instances for wf %s: %s", tgt_wf_id, e
+                )
+                with lock:
+                    result.failed += 1
+                    result.errors.append(f"list tgt tool_instances {tgt_wf_id}: {e}")
+                return
 
         if existing:
             tgt_ti = existing[0]
             if self.ctx.options.dry_run:
                 with lock:
-                    result.skipped += 1
+                    result.adopted += 1
                     self.ctx.remap.record("tool_instance", src_ti_id, tgt_ti["id"])
                 logger.info(
-                    "[dry-run] would re-PATCH metadata on adopted tool_instance "
+                    "[dry-run] would adopt tool_instance (metadata PATCH skipped) "
                     "src=%s -> tgt=%s (workflow %s)",
                     src_ti_id,
                     tgt_ti["id"],
@@ -160,7 +166,8 @@ class ToolInstancePhase(Phase):
             )
         elif self.ctx.options.dry_run:
             with lock:
-                result.skipped += 1
+                result.created += 1
+                self.ctx.remap.record_planned("tool_instance", src_ti_id)
             logger.info(
                 "[dry-run] would create tool_instance for tgt workflow %s "
                 "(src tool_instance %s)",

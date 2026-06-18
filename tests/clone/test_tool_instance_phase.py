@@ -207,7 +207,7 @@ def test_broken_adapter_refs_bumps_skipped_and_records_error():
     assert any("stale adapter refs" in e for e in result.errors)
 
 
-def test_dry_run_does_not_create_or_patch():
+def test_dry_run_predicts_create_without_writing():
     src = FakeClient()
     src.instances[SRC_WF] = [_src_ti("src-ti-1", SRC_WF, SRC_REG, {"x": 1})]
     tgt = FakeClient()
@@ -215,7 +215,30 @@ def test_dry_run_does_not_create_or_patch():
 
     result = ToolInstancePhase(ctx).run(CloneReport())
 
-    assert result.skipped == 1
+    assert result.created == 1
+    assert result.skipped == 0
+    assert tgt.create_calls == []
+    assert tgt.patch_calls == []
+    planned = ctx.remap.resolve("tool_instance", "src-ti-1")
+    assert planned is not None and ctx.remap.is_planned(planned)
+
+
+def test_dry_run_planned_workflow_predicts_create():
+    # Parent workflow would be freshly created (planned id). The tool_instance
+    # can't exist on target yet, so the phase must predict a create off the
+    # planned workflow rather than no-op.
+    src = FakeClient()
+    src.instances[SRC_WF] = [_src_ti("src-ti-1", SRC_WF, SRC_REG, {"x": 1})]
+    tgt = FakeClient()
+    remap = RemapTable()
+    remap.record_planned("workflow", SRC_WF)
+    remap.record_planned("prompt_studio_registry", SRC_REG)
+    ctx = _ctx(src, tgt, remap=remap, dry_run=True)
+
+    result = ToolInstancePhase(ctx).run(CloneReport())
+
+    assert result.created == 1
+    assert result.skipped == 0
     assert tgt.create_calls == []
     assert tgt.patch_calls == []
 
@@ -240,9 +263,10 @@ def test_dry_run_on_adopt_path_does_not_repatch_target():
 
     result = ToolInstancePhase(ctx).run(CloneReport())
 
-    assert result.skipped == 1
-    assert result.adopted == 0
+    # Adopt path: counts as adopted (matching a real run), metadata PATCH
+    # skipped, real target remap recorded.
+    assert result.adopted == 1
+    assert result.skipped == 0
     assert tgt.create_calls == []
     assert tgt.patch_calls == []
-    # Remap still gets recorded so downstream dry-run output is coherent.
     assert ctx.remap.resolve("tool_instance", "src-ti-1") == "tgt-pre-ti"

@@ -327,8 +327,9 @@ def test_dry_run_makes_no_writes_even_for_missing_files():
 
     result = FilesPhase(ctx).run(report)
 
-    assert result.skipped == 1
-    assert result.created == 0
+    # Predicts the upload (count matches a real run) without touching the wire.
+    assert result.created == 1
+    assert result.skipped == 0
     assert tgt.uploaded == []
     assert src.download_calls == []
 

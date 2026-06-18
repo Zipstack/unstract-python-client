@@ -775,15 +775,18 @@ class PlatformClient:
         """Fetch a workflow's HITLSettings row, or ``None`` if absent.
 
         The backend's ``settings_using_workflow`` raises ``DoesNotExist``
-        (→ 500) when no row exists rather than 404, so any error here is
-        treated as "no settings to clone".
+        (→ 500) when no row exists rather than 404, so only a 500 is treated
+        as "no settings to clone". Other errors (401/403/429) must surface —
+        suppressing them would silently drop a configured HITLSettings row.
         """
         try:
             body = self._request(
                 "GET", f"manual_review/settings/workflow/{workflow_id}/"
             )
-        except PlatformAPIError:
-            return None
+        except PlatformAPIError as e:
+            if e.status_code == 500:
+                return None
+            raise
         return (body or {}).get("data")
 
     def create_review_settings(self, payload: dict[str, Any]) -> dict[str, Any]:

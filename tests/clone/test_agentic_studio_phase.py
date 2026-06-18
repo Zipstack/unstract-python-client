@@ -299,6 +299,58 @@ def test_schema_clone_bound_to_target_project():
     assert schema["json_schema"] == '{"type":"object"}'
 
 
+def test_rerun_adopts_existing_prompt_versions_and_schemas():
+    # Re-run against a pair whose project + children already exist on target
+    # must adopt them (no duplicate child creates).
+    src = FakeClient(
+        projects=[_src_project("src-p", "Receipts")],
+        versions={
+            "src-p": [
+                {
+                    "id": "src-v1",
+                    "project": "src-p",
+                    "version": 1,
+                    "prompt_text": "v1",
+                    "parent_version": None,
+                }
+            ]
+        },
+        schemas={
+            "src-p": [
+                {
+                    "id": "src-s1",
+                    "project": "src-p",
+                    "json_schema": '{"type":"object"}',
+                    "version": 1,
+                }
+            ]
+        },
+    )
+    tgt = FakeClient(
+        projects=[{"id": "tgt-existing", "name": "Receipts"}],
+        versions={
+            "tgt-existing": [
+                {"id": "tgt-v1", "project": "tgt-existing", "version": 1}
+            ]
+        },
+        schemas={
+            "tgt-existing": [
+                {"id": "tgt-s1", "project": "tgt-existing", "version": 1}
+            ]
+        },
+    )
+    ctx = _ctx(src, tgt, on_name_conflict="adopt")
+
+    result = AgenticStudioPhase(ctx).run(CloneReport())
+
+    # No duplicate children created on the re-run.
+    assert tgt.created_versions == []
+    assert tgt.created_schemas == []
+    assert result.created == 0
+    # Existing version adopted + remap recorded so child parents still resolve.
+    assert ctx.remap.resolve("agentic_prompt_version", "src-v1") == "tgt-v1"
+
+
 def test_registry_republished_and_remapped():
     src = FakeClient(
         projects=[_src_project("src-p", "Receipts")],

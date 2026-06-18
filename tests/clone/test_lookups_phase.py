@@ -460,6 +460,50 @@ def test_published_version_replayed_publishes_in_order_and_records_remap():
     assert remap.resolve("lookup_version", "src-v2") is not None
 
 
+def test_staging_template_failure_skips_publish():
+    # If staging a version's template onto the draft fails, the version must
+    # NOT be published — else stale content freezes into a named version.
+    src = FakeClient(
+        lookups=[_src_lookup("src-lk", "Vendors")],
+        details={"src-lk": _src_detail("Current draft", llm="src-llm")},
+        versions={
+            "src-lk": [
+                {
+                    "version_id": "src-v1",
+                    "is_draft": False,
+                    "version_name": "v1",
+                    "version_number": 1,
+                },
+            ]
+        },
+        version_details={
+            "src-v1": {
+                "version_id": "src-v1",
+                "is_draft": False,
+                "version_name": "v1",
+                "version_number": 1,
+                "prompt_template": "Frozen v1",
+                "adapters": {"llm": "src-llm", "x2text": None},
+                "files": [],
+            },
+        },
+    )
+    tgt = FakeClient()
+
+    def _boom(lookup_id, prompt_template):
+        raise RuntimeError("template too long")
+
+    tgt.update_lookup_draft_template = _boom
+    remap = RemapTable()
+    remap.record("adapter", "src-llm", "tgt-llm")
+    ctx = _ctx(src, tgt, remap=remap)
+
+    result = LookupsPhase(ctx).run(CloneReport())
+
+    assert tgt.published_versions == []  # staging failed -> no publish
+    assert result.failed >= 1
+
+
 def test_published_version_adopted_on_rerun_no_republish():
     # Target already has a same-name definition with the same published version
     # names: re-run must adopt them (no re-publish) and still record remaps.

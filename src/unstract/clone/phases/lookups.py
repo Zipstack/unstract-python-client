@@ -403,6 +403,9 @@ class LookupsPhase(Phase):
                     result.errors.append(
                         f"lookup {name} version {version_name} template: {e}"
                     )
+                # Don't publish — a stale draft would freeze wrong content
+                # into the named version.
+                return
         tgt_adapters = self._remap_adapters(
             name, detail.get("adapters") or {}, result, lock
         )
@@ -423,6 +426,8 @@ class LookupsPhase(Phase):
                     result.errors.append(
                         f"lookup {name} version {version_name} adapters: {e}"
                     )
+                # Don't publish a version with unmapped adapters.
+                return
 
         self._replay_version_files(
             name, src_lookup_id, tgt_lookup_id, src_version_id, detail, result, lock

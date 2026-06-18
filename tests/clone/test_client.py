@@ -143,3 +143,17 @@ def test_options_response_with_null_body_still_yields_empty_schema():
     # Some deployments return 200 with no body on OPTIONS.
     client, _ = _client_with_mock(payload=None, text="")
     assert client.get_post_schema("pipeline/") == frozenset()
+
+
+def test_get_review_settings_500_treated_as_absent():
+    # Backend raises DoesNotExist (-> 500) when no HITLSettings row exists.
+    client, _ = _client_with_mock(status=500, text="DoesNotExist")
+    assert client.get_review_settings("wf-1") is None
+
+
+def test_get_review_settings_reraises_non_500():
+    # Auth / rate-limit errors must surface, not masquerade as "no settings".
+    client, _ = _client_with_mock(status=403, text="forbidden")
+    with pytest.raises(PlatformAPIError) as exc_info:
+        client.get_review_settings("wf-1")
+    assert exc_info.value.status_code == 403

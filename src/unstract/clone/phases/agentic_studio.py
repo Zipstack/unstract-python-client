@@ -251,6 +251,22 @@ class AgenticStudioPhase(Phase):
                 result.errors.append(f"agentic {name} list prompt-versions: {e}")
             return
 
+        # Adopt versions already on target (keyed by version number) so a
+        # re-run against the same pair doesn't re-create duplicates.
+        try:
+            tgt_versions = self.ctx.target.list_agentic_prompt_versions(
+                project_id=tgt_project_id
+            )
+        except Exception as e:
+            logger.warning(
+                "agentic '%s': target prompt-version listing failed "
+                "(re-run may duplicate): %s",
+                name,
+                e,
+            )
+            tgt_versions = []
+        tgt_by_version = {v.get("version"): v for v in tgt_versions}
+
         # parent_version is a self-FK: clone roots (no parent) first so a child's
         # parent already resolves. Sort by version ascending as a stable order.
         ordered = sorted(
@@ -259,7 +275,7 @@ class AgenticStudioPhase(Phase):
         )
         for src in ordered:
             self._clone_one_prompt_version(
-                name, src, tgt_project_id, result, lock
+                name, src, tgt_project_id, tgt_by_version, result, lock
             )
 
     def _clone_one_prompt_version(
@@ -267,10 +283,20 @@ class AgenticStudioPhase(Phase):
         name: str,
         src: dict[str, Any],
         tgt_project_id: str,
+        tgt_by_version: dict[Any, dict[str, Any]],
         result: PhaseResult,
         lock: threading.Lock,
     ) -> None:
         src_vid = src["id"]
+
+        existing = tgt_by_version.get(src.get("version"))
+        if existing is not None:
+            with lock:
+                result.adopted += 1
+                self.ctx.remap.record(
+                    "agentic_prompt_version", src_vid, existing["id"]
+                )
+            return
         payload = {
             k: v
             for k, v in src.items()
@@ -349,7 +375,27 @@ class AgenticStudioPhase(Phase):
                 result.errors.append(f"agentic {name} list schemas: {e}")
             return
 
+        # Adopt schemas already on target (keyed by version) so a re-run
+        # doesn't re-create duplicates.
+        try:
+            tgt_schemas = self.ctx.target.list_agentic_schemas(
+                project_id=tgt_project_id
+            )
+        except Exception as e:
+            logger.warning(
+                "agentic '%s': target schema listing failed (re-run may "
+                "duplicate): %s",
+                name,
+                e,
+            )
+            tgt_schemas = []
+        existing_versions = {s.get("version") for s in tgt_schemas}
+
         for src in src_schemas:
+            if src.get("version") in existing_versions:
+                with lock:
+                    result.adopted += 1
+                continue
             payload = {
                 k: v
                 for k, v in src.items()

@@ -2,8 +2,11 @@
 
 Covers: create-fresh definition + draft template patch + adapter remap;
 adopt-by-name; a draft-pinned assignment remapped via the ``prompt`` +
-``lookup_definition`` tables; a published-pinned assignment skipped with a
-warning; dry-run records a planned remap and writes nothing.
+``lookup_definition`` tables; share replication (PATCH with mapped users +
+``shared_to_org``); published-version replay (publish in ``version_number``
+order + ``lookup_version`` remap recorded + draft restored after replay); a
+published-pinned assignment resolved via the version remap; dry-run records a
+planned remap and writes nothing.
 
 A single scripted fake plays both source and target; the target side records
 every write so assertions read off ``posts`` / ``patches``.
@@ -27,7 +30,12 @@ class FakeClient:
         files=None,
         file_blobs=None,
         assignments=None,
+        versions=None,
+        version_details=None,
+        version_file_blobs=None,
+        users=None,
     ):
+        self._users = list(users or [])
         self.lookups = list(lookups or [])
         # lookup_id -> detail dict (draft template + adapters + draft_version_id)
         self.details = dict(details or {})
@@ -36,12 +44,20 @@ class FakeClient:
         # file_id -> bytes
         self.file_blobs = dict(file_blobs or {})
         self.assignments = list(assignments or [])
+        # lookup_id -> list of version rows (draft + published)
+        self.versions = {k: list(v) for k, v in (versions or {}).items()}
+        # version_id -> version detail dict
+        self.version_details = dict(version_details or {})
+        # (version_id, file_id) -> bytes
+        self.version_file_blobs = dict(version_file_blobs or {})
 
         self.created_lookups: list[dict] = []
         self.draft_template_patches: list[tuple[str, str]] = []
         self.draft_adapter_patches: list[tuple[str, dict]] = []
         self.uploaded_files: list[tuple[str, str]] = []
         self.created_assignments: list[dict] = []
+        self.share_patches: list[tuple[str, dict]] = []
+        self.published_versions: list[tuple[str, dict]] = []
         self._next_id = 1
 
     # ----- schema / definitions -----
@@ -96,6 +112,51 @@ class FakeClient:
         self._next_id += 1
         return {"file_id": f"tgt-file-{file_name}"}
 
+    # ----- share -----
+
+    def list_users(self):
+        return list(self._users)
+
+    def update_lookup_share(self, lookup_id, payload):
+        self.share_patches.append((lookup_id, payload))
+        return {"lookup_id": lookup_id, **payload}
+
+    # ----- versions -----
+
+    def list_lookup_versions(self, lookup_id):
+        return list(self.versions.get(lookup_id, []))
+
+    def get_lookup_version(self, lookup_id, version_id):
+        return self.version_details[version_id]
+
+    def download_lookup_version_file(self, lookup_id, version_id, file_id):
+        return self.version_file_blobs[(version_id, file_id)]
+
+    def publish_lookup_version(self, lookup_id, payload):
+        """Freeze the current draft into a published version + spawn a fresh
+        draft (mirrors the backend's ``_publish_draft``).
+        """
+        detail = self.details[lookup_id]
+        max_num = max(
+            (v.get("version_number") or 0 for v in self.versions.get(lookup_id, [])),
+            default=0,
+        )
+        vid = f"tgt-ver-{self._next_id:04d}"
+        self._next_id += 1
+        published = {
+            "version_id": vid,
+            "is_draft": False,
+            "version_name": payload.get("version_name") or f"v{max_num + 1}",
+            "version_number": max_num + 1,
+        }
+        self.versions.setdefault(lookup_id, []).append(published)
+        # New empty-ish draft: backend clones the published content into it,
+        # but the phase re-stages content per version anyway.
+        new_draft_id = f"tgt-draft-{vid}"
+        detail["draft_version_id"] = new_draft_id
+        self.published_versions.append((lookup_id, published))
+        return published
+
     # ----- assignments -----
 
     def list_lookup_assignments(self):
@@ -123,11 +184,22 @@ def _src_lookup(lookup_id, name):
     return {"lookup_id": lookup_id, "name": name, "description": f"{name} desc"}
 
 
-def _src_detail(template, *, llm=None, x2text=None):
+def _src_detail(
+    template,
+    *,
+    llm=None,
+    x2text=None,
+    shared_to_org=False,
+    shared_users=None,
+    created_by=None,
+):
     return {
         "prompt_template": template,
         "draft_version_id": "src-draft",
         "adapters": {"llm": llm, "x2text": x2text},
+        "shared_to_org": shared_to_org,
+        "shared_users": list(shared_users or []),
+        "created_by": created_by,
     }
 
 
@@ -204,6 +276,44 @@ def test_adopt_by_name_records_remap_no_create():
     assert ctx.remap.resolve("lookup_definition", "src-lk") == "tgt-existing"
 
 
+def test_share_replication_patches_mapped_users_and_org_flag():
+    src = FakeClient(
+        lookups=[_src_lookup("src-lk", "Vendors")],
+        details={
+            "src-lk": _src_detail(
+                "T",
+                shared_to_org=True,
+                shared_users=[10, 20],
+                created_by=99,  # owner — skipped from share payload
+            )
+        },
+        users=[
+            {"id": 10, "email": "a@x.com"},
+            {"id": 20, "email": "b@x.com"},
+            {"id": 99, "email": "owner@x.com"},
+        ],
+    )
+    tgt = FakeClient(
+        users=[
+            {"id": 110, "email": "a@x.com"},
+            {"id": 120, "email": "b@x.com"},
+        ],
+    )
+    ctx = _ctx(src, tgt)
+    report = CloneReport()
+
+    LookupsPhase(ctx).run(report)
+
+    new_id = tgt.created_lookups[0]["lookup_id"]
+    assert len(tgt.share_patches) == 1
+    lid, payload = tgt.share_patches[0]
+    assert lid == new_id
+    assert payload["shared_to_org"] is True
+    assert sorted(payload["shared_users"]) == [110, 120]
+    # Lookups have no group sharing — axis omitted entirely.
+    assert "shared_groups" not in payload
+
+
 def test_draft_pinned_assignment_remapped():
     src = FakeClient(
         lookups=[_src_lookup("src-lk", "Vendors")],
@@ -238,32 +348,160 @@ def test_draft_pinned_assignment_remapped():
     assert asg["variable_mappings"] == {"vendor": "tgt-prompt"}
 
 
-def test_published_pinned_assignment_skipped_with_warning():
-    src = FakeClient(
+def _src_published_lookup():
+    """A source lookup carrying one published version + a draft, with a
+    published-pinned assignment. Shared by the replay/resolution tests.
+    """
+    return FakeClient(
         lookups=[_src_lookup("src-lk", "Vendors")],
-        details={"src-lk": _src_detail("T")},
+        details={
+            "src-lk": _src_detail("Current draft", llm="src-llm")
+        },
+        versions={
+            "src-lk": [
+                {
+                    "version_id": "src-draft",
+                    "is_draft": True,
+                    "version_name": "",
+                    "version_number": 0,
+                },
+                {
+                    "version_id": "src-v1",
+                    "is_draft": False,
+                    "version_name": "v1",
+                    "version_number": 1,
+                },
+            ]
+        },
+        version_details={
+            "src-v1": {
+                "version_id": "src-v1",
+                "is_draft": False,
+                "version_name": "v1",
+                "version_number": 1,
+                "prompt_template": "Frozen v1",
+                "adapters": {"llm": "src-llm", "x2text": None},
+                "files": [],
+            }
+        },
         assignments=[
             {
                 "assignment_id": "src-asg",
                 "prompt": "src-prompt",
-                "version": "src-published",
+                "version": "src-v1",
                 "lookup_definition": "src-lk",
                 "is_draft_version": False,
                 "variable_mappings": {},
             }
         ],
     )
+
+
+def test_published_version_replayed_publishes_in_order_and_records_remap():
+    src = FakeClient(
+        lookups=[_src_lookup("src-lk", "Vendors")],
+        details={"src-lk": _src_detail("Current draft", llm="src-llm")},
+        versions={
+            "src-lk": [
+                # Out-of-order on purpose: replay must sort by version_number.
+                {
+                    "version_id": "src-v2",
+                    "is_draft": False,
+                    "version_name": "v2",
+                    "version_number": 2,
+                },
+                {
+                    "version_id": "src-draft",
+                    "is_draft": True,
+                    "version_name": "",
+                    "version_number": 0,
+                },
+                {
+                    "version_id": "src-v1",
+                    "is_draft": False,
+                    "version_name": "v1",
+                    "version_number": 1,
+                },
+            ]
+        },
+        version_details={
+            "src-v1": {
+                "version_id": "src-v1",
+                "is_draft": False,
+                "version_name": "v1",
+                "version_number": 1,
+                "prompt_template": "Frozen v1",
+                "adapters": {"llm": "src-llm", "x2text": None},
+                "files": [],
+            },
+            "src-v2": {
+                "version_id": "src-v2",
+                "is_draft": False,
+                "version_name": "v2",
+                "version_number": 2,
+                "prompt_template": "Frozen v2",
+                "adapters": {"llm": "src-llm", "x2text": None},
+                "files": [],
+            },
+        },
+    )
     tgt = FakeClient()
     remap = RemapTable()
-    remap.record("prompt", "src-prompt", "tgt-prompt")
+    remap.record("adapter", "src-llm", "tgt-llm")
     ctx = _ctx(src, tgt, remap=remap)
     report = CloneReport()
 
-    result = LookupsPhase(ctx).run(report)
+    LookupsPhase(ctx).run(report)
 
-    assert tgt.created_assignments == []
-    assert result.skipped == 1
-    assert any("published-version" in w for w in result.warnings)
+    # Published in version_number order.
+    assert [p[1]["version_name"] for p in tgt.published_versions] == ["v1", "v2"]
+    # A version remap recorded for each published version.
+    assert remap.resolve("lookup_version", "src-v1") is not None
+    assert remap.resolve("lookup_version", "src-v2") is not None
+
+
+def test_published_pinned_assignment_resolves_via_version_remap():
+    src = _src_published_lookup()
+    tgt = FakeClient()
+    remap = RemapTable()
+    remap.record("prompt", "src-prompt", "tgt-prompt")
+    remap.record("adapter", "src-llm", "tgt-llm")
+    ctx = _ctx(src, tgt, remap=remap)
+    report = CloneReport()
+
+    LookupsPhase(ctx).run(report)
+
+    # No longer skipped — the published pin resolves via the version remap.
+    assert len(tgt.created_assignments) == 1
+    asg = tgt.created_assignments[0]
+    assert asg["prompt"] == "tgt-prompt"
+    tgt_v1 = remap.resolve("lookup_version", "src-v1")
+    assert tgt_v1 is not None
+    assert asg["version"] == tgt_v1
+
+
+def test_draft_restored_after_replay():
+    src = _src_published_lookup()
+    tgt = FakeClient()
+    remap = RemapTable()
+    remap.record("prompt", "src-prompt", "tgt-prompt")
+    remap.record("adapter", "src-llm", "tgt-llm")
+    ctx = _ctx(src, tgt, remap=remap)
+    report = CloneReport()
+
+    LookupsPhase(ctx).run(report)
+
+    new_id = tgt.created_lookups[0]["lookup_id"]
+    # The LAST template patch on the target draft is the source's CURRENT
+    # draft, not the frozen v1 content staged during replay.
+    last_template = [
+        t for (lid, t) in tgt.draft_template_patches if lid == new_id
+    ][-1]
+    assert last_template == "Current draft"
+    # Source draft version id maps to the target's final draft id.
+    src_draft = src.details["src-lk"]["draft_version_id"]
+    tgt_draft = tgt.details[new_id]["draft_version_id"]
+    assert remap.resolve("lookup_version", src_draft) == tgt_draft
 
 
 def test_dry_run_records_planned_and_writes_nothing():

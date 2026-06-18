@@ -44,6 +44,7 @@ from typing import Any
 from unstract.clone.exceptions import NameConflictError
 from unstract.clone.phases.base import Phase, build_post_payload
 from unstract.clone.report import CloneReport, PhaseResult
+from unstract.clone.sharing import replicate_share
 
 logger = logging.getLogger(__name__)
 
@@ -166,9 +167,10 @@ class AgenticStudioPhase(Phase):
                 tgt_project_id,
             )
 
-        # Children + registry write to the real target only.
+        # Children + registry + share write to the real target only.
         if self.ctx.options.dry_run:
             return
+        self._replicate_share(src, name, tgt_project_id, result, lock)
         self._clone_prompt_versions(name, src_project_id, tgt_project_id, result, lock)
         self._clone_schemas(name, src_project_id, tgt_project_id, result, lock)
         self._republish_registry(name, src_project_id, tgt_project_id, result, lock)
@@ -206,6 +208,35 @@ class AgenticStudioPhase(Phase):
                 continue
             payload[slot] = tgt_adapter_id
         return payload
+
+    # ----- share state -----
+
+    def _replicate_share(
+        self,
+        src: dict[str, Any],
+        name: str,
+        tgt_project_id: str,
+        result: PhaseResult,
+        lock: threading.Lock,
+    ) -> None:
+        # The project list/detail share the same serializer, so the source row
+        # already carries shared_users (target-mappable user pks), shared_to_org
+        # and created_by — no detail fetch needed.
+        # ponytail: agentic group sharing is deferred — shared_groups is
+        # polymorphic/read-only on the project serializer (share via the detail
+        # PATCH only reaches shared_users + shared_to_org), so include_groups is
+        # off and a source group share yields a single warning.
+        replicate_share(
+            self.ctx,
+            apply_fn=lambda p: self.ctx.target.update_agentic_project_share(
+                tgt_project_id, p
+            ),
+            entity_label=f"agentic project '{name}'",
+            src=src,
+            result=result,
+            lock=lock,
+            include_groups=False,
+        )
 
     # ----- prompt versions -----
 

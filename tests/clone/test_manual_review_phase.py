@@ -2,9 +2,10 @@
 
 Covers: per-workflow RuleEngine + HITLSettings cloned with the workflow
 remap (incl. nested confidence_filters); a workflow with no target mapping is
-silently skipped; org-level AutoApprovalSettings cloned once with an id-remap
-warning; ReviewApiKey recreation emits the re-wire warning; dry-run plans the
-creates without writing.
+silently skipped; org-level AutoApprovalSettings cloned once with
+auto_approved_users remapped by email and doc-classes carried verbatim;
+ReviewApiKey recreation emits the re-wire warning; dry-run plans the creates
+without writing.
 
 A single scripted fake plays both source and target; the target side records
 every write so assertions read off the ``created_*`` lists.
@@ -28,6 +29,7 @@ class FakeClient:
         settings=None,
         auto_approval=None,
         api_keys=None,
+        users=None,
     ):
         self.workflows = list(workflows or [])
         # (workflow_id, rule_type) -> rule dict
@@ -36,6 +38,7 @@ class FakeClient:
         self.settings = dict(settings or {})
         self.auto_approval = list(auto_approval or [])
         self.api_keys = list(api_keys or [])
+        self.users = list(users or [])
 
         self.created_rules: list[dict] = []
         self.created_settings: list[dict] = []
@@ -44,6 +47,9 @@ class FakeClient:
 
     def list_workflows(self):
         return list(self.workflows)
+
+    def list_users(self):
+        return list(self.users)
 
     def get_review_rule(self, workflow_id, rule_type):
         return self.rules.get((str(workflow_id), rule_type))
@@ -159,7 +165,7 @@ def test_workflow_without_target_mapping_skipped():
     assert result.failed == 0
 
 
-def test_auto_approval_cloned_once_with_warning():
+def test_auto_approval_remaps_users_by_email_and_carries_doc_classes():
     src = FakeClient(
         workflows=[],
         auto_approval=[
@@ -169,8 +175,9 @@ def test_auto_approval_cloned_once_with_warning():
                 "auto_approved_users": ["7"],
             }
         ],
+        users=[{"id": 7, "email": "Alice@x.com"}],
     )
-    tgt = FakeClient()
+    tgt = FakeClient(users=[{"id": 42, "email": "alice@x.com"}])
     ctx = _ctx(src, tgt, remap=RemapTable())
     report = CloneReport()
 
@@ -178,11 +185,40 @@ def test_auto_approval_cloned_once_with_warning():
 
     assert len(tgt.created_auto_approval) == 1
     payload = tgt.created_auto_approval[0]
+    # Doc classes carried verbatim (no cross-org remap).
     assert payload["auto_approved_document_classes"] == ["cls-1"]
-    assert payload["auto_approved_users"] == ["7"]
+    # User src pk 7 -> target pk 42 via case-insensitive email match.
+    assert payload["auto_approved_users"] == ["42"]
     assert "organization" not in payload
-    assert any("do not remap across orgs" in w for w in result.warnings)
+    assert any("manual verification" in w for w in result.warnings)
     assert result.created == 1
+
+
+def test_auto_approval_user_absent_on_target_skipped_with_warning():
+    src = FakeClient(
+        workflows=[],
+        auto_approval=[
+            {
+                "id": "aa1",
+                "auto_approved_document_classes": [],
+                "auto_approved_users": ["7", "8"],
+            }
+        ],
+        users=[
+            {"id": 7, "email": "alice@x.com"},
+            {"id": 8, "email": "bob@x.com"},
+        ],
+    )
+    # bob has no counterpart on the target org.
+    tgt = FakeClient(users=[{"id": 42, "email": "alice@x.com"}])
+    ctx = _ctx(src, tgt, remap=RemapTable())
+    report = CloneReport()
+
+    result = ManualReviewPhase(ctx).run(report)
+
+    payload = tgt.created_auto_approval[0]
+    assert payload["auto_approved_users"] == ["42"]
+    assert any("bob@x.com not found in target org" in w for w in result.warnings)
 
 
 def test_review_api_key_recreated_with_warning():

@@ -38,8 +38,11 @@ class FakeClient:
         schemas=None,
         settings=None,
         registries=None,
+        users=None,
     ):
         self.projects = list(projects or [])
+        self.users = list(users or [])
+        self.shared_projects: list[tuple[str, dict]] = []
         # project_id -> list of prompt-version rows
         self.versions = {k: list(v) for k, v in (versions or {}).items()}
         # project_id -> list of schema rows
@@ -75,6 +78,15 @@ class FakeClient:
         self.projects.append(new)
         self.created_projects.append(new)
         return new
+
+    def update_agentic_project_share(self, project_id, payload):
+        self.shared_projects.append((project_id, payload))
+        return {"id": project_id, **payload}
+
+    # ----- users (share replication) -----
+
+    def list_users(self):
+        return list(self.users)
 
     # ----- prompt versions -----
 
@@ -365,3 +377,58 @@ def test_dry_run_plans_without_writing():
     assert planned is not None and ctx.remap.is_planned(planned)
     planned_v = ctx.remap.resolve("agentic_prompt_version", "src-v1")
     assert planned_v is not None and ctx.remap.is_planned(planned_v)
+
+
+def test_share_replicated_with_mapped_users_and_org_flag():
+    src = FakeClient(
+        projects=[
+            {
+                "id": "src-p",
+                "name": "Receipts",
+                "description": "d",
+                "created_by": 1,  # owner — skipped, server-managed on target
+                "shared_to_org": True,
+                "shared_users": [1, 2],  # pks from the project serializer
+            }
+        ],
+        users=[
+            {"id": 1, "email": "owner@x.com"},
+            {"id": 2, "email": "alice@x.com"},
+        ],
+    )
+    tgt = FakeClient(users=[{"id": 42, "email": "alice@x.com"}])
+    ctx = _ctx(src, tgt)
+
+    AgenticStudioPhase(ctx).run(CloneReport())
+
+    tgt_pid = tgt.created_projects[0]["id"]
+    assert len(tgt.shared_projects) == 1
+    pid, payload = tgt.shared_projects[0]
+    assert pid == tgt_pid
+    assert payload["shared_to_org"] is True
+    assert payload["shared_users"] == [42]  # owner dropped, alice remapped
+    assert "shared_groups" not in payload  # include_groups=False
+
+
+def test_source_group_share_warns_without_failure():
+    src = FakeClient(
+        projects=[
+            {
+                "id": "src-p",
+                "name": "Receipts",
+                "description": "d",
+                "created_by": 1,
+                "shared_groups": [7],  # unsupported via the project PATCH
+            }
+        ],
+        users=[{"id": 1, "email": "owner@x.com"}],
+    )
+    tgt = FakeClient()
+    ctx = _ctx(src, tgt)
+
+    result = AgenticStudioPhase(ctx).run(CloneReport())
+
+    assert result.failed == 0
+    assert sum("group share(s) not supported" in w for w in result.warnings) == 1
+    # No shareable axes remained, so no PATCH fires.
+    assert tgt.shared_projects == []

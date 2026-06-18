@@ -666,6 +666,72 @@ class PlatformClient:
         """
         return self._request("POST", "lookups/assignments/", json=payload)
 
+    def update_lookup_share(
+        self, lookup_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Replicate share state onto a lookup via its detail PATCH.
+
+        ``payload`` carries ``shared_to_org`` + ``shared_users`` (target user
+        pks). The model has no group sharing, so no ``shared_groups`` axis.
+        """
+        return self._request(
+            "PATCH", f"lookups/definitions/{lookup_id}/", json=payload
+        )
+
+    def list_lookup_versions(self, lookup_id: str) -> list[dict[str, Any]]:
+        """List a lookup's versions (draft + published).
+
+        Rows carry ``version_id``, ``is_draft``, ``version_number``,
+        ``version_name``; the detail (``get_lookup_version``) inlines content.
+        """
+        result = self._request(
+            "GET", f"lookups/definitions/{lookup_id}/versions/"
+        )
+        if isinstance(result, list):
+            return result
+        # This endpoint wraps rows as {"versions": [...], "next_version_number"}.
+        return (result or {}).get("versions", (result or {}).get("results", []))
+
+    def get_lookup_version(
+        self, lookup_id: str, version_id: str
+    ) -> dict[str, Any]:
+        """Fetch a version's detail (``prompt_template``, adapters, files)."""
+        return self._request(
+            "GET", f"lookups/definitions/{lookup_id}/versions/{version_id}/"
+        )
+
+    def download_lookup_version_file(
+        self, lookup_id: str, version_id: str, file_id: str
+    ) -> bytes:
+        """Download a published version's reference-file bytes (raw body)."""
+        path = (
+            f"lookups/definitions/{lookup_id}/versions/{version_id}/"
+            f"files/{file_id}/content/"
+        )
+        url = self._url(path)
+        logger.debug("GET %s", url)
+        resp = self._session.get(url, timeout=self.timeout, verify=self.verify)
+        if not 200 <= resp.status_code < 300:
+            raise PlatformAPIError(
+                f"GET {path} returned {resp.status_code}",
+                status_code=resp.status_code,
+                body=resp.text[:2000],
+            )
+        return resp.content
+
+    def publish_lookup_version(
+        self, lookup_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Freeze the current draft into a published version.
+
+        ``payload`` carries ``version_name`` (+ optional ``rebind_assignments``).
+        Returns the new published version (``version_id``). Used to replay a
+        source lookup's published-version history onto the target.
+        """
+        return self._request(
+            "POST", f"lookups/definitions/{lookup_id}/versions/", json=payload
+        )
+
     # ----- manual review / HITL (cloud-only) -----
     #
     # Each workflow can hold one RuleEngine row per ``rule_type`` (DB / API)
@@ -778,6 +844,19 @@ class PlatformClient:
     def create_agentic_project(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Create an agentic project. Returns the created row (carries ``id``)."""
         return self._request("POST", "agentic/projects/", json=payload)
+
+    def update_agentic_project_share(
+        self, project_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Replicate share state onto an agentic project via its detail PATCH.
+
+        ``payload`` carries ``shared_to_org`` + ``shared_users`` (target user
+        pks). ``shared_groups`` is polymorphic/read-only on this serializer and
+        is handled by the share helper's group-omission warning.
+        """
+        return self._request(
+            "PATCH", f"agentic/projects/{project_id}/", json=payload
+        )
 
     def list_agentic_prompt_versions(
         self, *, project_id: str | None = None

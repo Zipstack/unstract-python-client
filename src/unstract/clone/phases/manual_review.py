@@ -19,9 +19,13 @@ Three passes:
    replay its RuleEngine rows (one per ``rule_type``, with nested
    ``confidence_filters``) and its HITLSettings row, rebinding ``workflow``
    to the target id. Adopt-by-presence on the target.
-2. **AutoApprovalSettings** — org-level, cloned once. Its array fields hold
-   document-class / user ids that don't remap across orgs; carried verbatim
-   with a warning.
+2. **AutoApprovalSettings** — org-level, cloned once. ``auto_approved_users``
+   holds source-org user pks; remapped by email (same as share replication).
+   ``auto_approved_document_classes`` holds workflow/class-name strings with no
+   reliable cross-org remap; carried verbatim with a warning.
+
+MR config rows (RuleEngine/HITLSettings/AutoApprovalSettings) are workflow- or
+org-scoped and inherit visibility from there — no per-entity share replication.
 3. **ReviewApiKey** — recreated (the secret is server-minted and cannot be
    copied); operator is warned to re-wire external consumers.
 """
@@ -34,6 +38,11 @@ from typing import Any
 
 from unstract.clone.phases.base import Phase
 from unstract.clone.report import CloneReport, PhaseResult
+from unstract.clone.sharing import (
+    is_service_account,
+    source_user_by_id,
+    target_user_id_by_email,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -288,15 +297,18 @@ class ManualReviewPhase(Phase):
         src = src_rows[0]  # Unique per org — at most one row.
 
         doc_classes = src.get("auto_approved_document_classes") or []
-        users = src.get("auto_approved_users") or []
-        # These arrays hold source-org document-class / user ids; there is no
-        # cross-org remap for them, so they are carried verbatim and flagged.
-        if doc_classes or users:
+        # Mixed workflow-id / class-name strings with no reliable cross-org
+        # remap — carried verbatim and flagged for manual verification.
+        if doc_classes:
             result.warnings.append(
-                "auto-approval settings cloned with source-org ids in "
-                "auto_approved_document_classes / auto_approved_users — these "
-                "do not remap across orgs; verify them on the target"
+                "auto-approval cloned with source-org strings in "
+                "auto_approved_document_classes — these may need manual "
+                "verification on the target"
             )
+
+        users = self._remap_auto_approved_users(
+            src.get("auto_approved_users") or [], result
+        )
 
         if self.ctx.options.dry_run:
             result.created += 1
@@ -330,6 +342,44 @@ class ManualReviewPhase(Phase):
             return
         result.created += 1
         logger.info("created org auto-approval settings")
+
+    def _remap_auto_approved_users(
+        self, src_user_ids: list[Any], result: PhaseResult
+    ) -> list[str]:
+        """Map source-org user pks to target pks by email (mirrors share
+        replication). Unmappable users are skipped with a warning; an
+        unavailable listing carries the field empty rather than failing."""
+        if not src_user_ids:
+            return []
+        src_users = source_user_by_id(self.ctx)
+        tgt_by_email = target_user_id_by_email(self.ctx)
+        if src_users is None or tgt_by_email is None:
+            result.warnings.append(
+                "auto-approval: users listing unavailable — "
+                f"{len(src_user_ids)} auto-approved user(s) not replicated"
+            )
+            return []
+        mapped: list[str] = []
+        for uid in src_user_ids:
+            row = src_users.get(str(uid))
+            if row is None:
+                result.warnings.append(
+                    f"auto-approval: source user id {uid} not in source users "
+                    "listing — skipped"
+                )
+                continue
+            if is_service_account(row):
+                continue
+            email = row["email"]
+            tgt_uid = tgt_by_email.get(email.lower())
+            if tgt_uid is None:
+                result.warnings.append(
+                    f"auto-approval: user {email} not found in target org — skipped"
+                )
+                continue
+            # Stored as CharField (str) ids in the ArrayField.
+            mapped.append(str(tgt_uid))
+        return mapped
 
     # ----- org-level: review api keys -----
 

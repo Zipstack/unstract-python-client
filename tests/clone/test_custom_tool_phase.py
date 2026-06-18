@@ -49,6 +49,7 @@ class FakeClient:
         self.export_blobs: dict[str, dict] = {}
         self.registries_by_tool: dict[str, dict] = {}
         self.adapters_by_name: dict[str, dict] = {}
+        self.prompts_by_tool: dict[str, list[dict]] = {}
         # Call recorders.
         self.import_calls: list[tuple[dict, dict | None]] = []
         self.sync_calls: list[tuple[str, dict, bool]] = []
@@ -89,6 +90,9 @@ class FakeClient:
             return list(self.registries_by_tool.values())
         reg = self.registries_by_tool.get(custom_tool)
         return [reg] if reg else []
+
+    def list_prompts(self, tool_id: str) -> list[dict]:
+        return list(self.prompts_by_tool.get(tool_id, []))
 
     # --- writes ---
     def import_project(
@@ -223,7 +227,8 @@ def test_fresh_imports_with_name_resolved_adapter_ids_and_records_registry():
 
     assert result.created == 1
     assert result.failed == 0
-    # Exactly one import_project call with the right export blob + name-resolved adapter ids.
+    # Exactly one import_project call with the right export blob + name-resolved
+    # adapter ids.
     assert len(tgt.import_calls) == 1
     blob, adapter_ids = tgt.import_calls[0]
     assert blob["tool_metadata"]["tool_name"] == "Invoice Extractor"
@@ -414,3 +419,41 @@ def test_missing_target_adapter_fails_tool_cleanly():
     assert tgt.export_tool_calls == []
     # No custom_tool remap recorded.
     assert ctx.remap.resolve("custom_tool", "src-tool-x") is None
+
+
+def test_remap_prompts_maps_src_to_tgt_by_prompt_key():
+    import threading
+
+    src = FakeClient()
+    tgt = FakeClient()
+    src.prompts_by_tool["src-tool"] = [
+        {"prompt_id": "sp1", "prompt_key": "k1"},
+        {"prompt_id": "sp2", "prompt_key": "k2"},
+    ]
+    tgt.prompts_by_tool["tgt-tool"] = [
+        {"prompt_id": "tp1", "prompt_key": "k1"},
+        {"prompt_id": "tp2", "prompt_key": "k2"},
+    ]
+    ctx = _ctx(src, tgt)
+
+    CustomToolPhase(ctx)._remap_prompts(
+        "src-tool", "tgt-tool", "T", threading.Lock()
+    )
+
+    assert ctx.remap.resolve("prompt", "sp1") == "tp1"
+    assert ctx.remap.resolve("prompt", "sp2") == "tp2"
+
+
+def test_record_planned_prompts_records_synthetic_remaps():
+    import threading
+
+    src = FakeClient()
+    src.prompts_by_tool["src-tool"] = [
+        {"prompt_id": "sp1", "prompt_key": "k1"},
+    ]
+    ctx = _ctx(src, FakeClient(), dry_run=True)
+
+    CustomToolPhase(ctx)._record_planned_prompts("src-tool", threading.Lock())
+
+    planned = ctx.remap.resolve("prompt", "sp1")
+    assert planned is not None and ctx.remap.is_planned(planned)

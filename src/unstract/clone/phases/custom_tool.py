@@ -167,7 +167,14 @@ class CustomToolPhase(Phase):
             # needs a prompt_studio_registry remap to plan-count. Mirror it
             # with a planned id derived from the source registry (read-only).
             self._record_planned_registry(src_tool_id, tool_name, lock)
+            self._record_planned_prompts(src_tool_id, lock)
             return
+
+        # Map source prompt ids -> target prompt ids by prompt_key so
+        # prompt-scoped phases (e.g. lookup assignments) can rewrite their
+        # ToolStudioPrompt FKs. Target prompts already exist here (created by
+        # import_project on fresh, sync_prompts on adopt).
+        self._remap_prompts(src_tool_id, tgt_tool_id, tool_name, lock)
 
         # Tools never exported on source (e.g. empty projects — backend
         # blocks their export) have no registry entry and no workflow
@@ -250,6 +257,58 @@ class CustomToolPhase(Phase):
             self.ctx.remap.record_planned(
                 "prompt_studio_registry", src_regs[0]["prompt_registry_id"]
             )
+
+    def _remap_prompts(
+        self,
+        src_tool_id: str,
+        tgt_tool_id: str,
+        tool_name: str,
+        lock: threading.Lock,
+    ) -> None:
+        """Record source->target prompt-id remaps, matched by prompt_key.
+
+        Best-effort: a prompt without a matching key on target is skipped
+        (the dependent phase counts it as unresolved), and a listing
+        failure leaves the remap empty rather than failing the tool.
+        """
+        try:
+            src_prompts = self.ctx.source.list_prompts(src_tool_id)
+            tgt_prompts = self.ctx.target.list_prompts(tgt_tool_id)
+        except Exception as e:
+            logger.warning(
+                "prompt-id remap skipped for tool '%s' "
+                "(dependent prompt-scoped phases may under-resolve): %s",
+                tool_name,
+                e,
+            )
+            return
+        # prompt_key is effectively unique per tool; first match wins.
+        tgt_by_key = {p["prompt_key"]: p["prompt_id"] for p in tgt_prompts}
+        with lock:
+            for sp in src_prompts:
+                tgt_pid = tgt_by_key.get(sp["prompt_key"])
+                if tgt_pid:
+                    self.ctx.remap.record("prompt", sp["prompt_id"], tgt_pid)
+
+    def _record_planned_prompts(
+        self, src_tool_id: str, lock: threading.Lock
+    ) -> None:
+        """Dry-run: record a planned prompt remap per source prompt so
+        prompt-scoped phases can resolve their FK and plan-count.
+        """
+        try:
+            src_prompts = self.ctx.source.list_prompts(src_tool_id)
+        except Exception as e:
+            logger.warning(
+                "[dry-run] source prompt listing failed for tool %s "
+                "(prompt-scoped plan may under-count): %s",
+                src_tool_id,
+                e,
+            )
+            return
+        with lock:
+            for sp in src_prompts:
+                self.ctx.remap.record_planned("prompt", sp["prompt_id"])
 
     def _adopt(
         self,

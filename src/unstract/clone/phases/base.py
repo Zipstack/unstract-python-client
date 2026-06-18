@@ -61,6 +61,11 @@ class Phase(ABC):
     # Share endpoint template for shareable resource types, e.g.
     # "adapter/{id}/share/" ({id} = target pk). None = not shareable.
     share_path_template: str | None = None
+    # Capability-gate for cloud-only phases. When set, the orchestrator probes
+    # this list endpoint on source/target before running and applies the skip
+    # matrix (source absent → silent skip; target absent → warn + skip). Core
+    # OSS phases leave it None and always run (no probe call at all).
+    probe_path: str | None = None
 
     def __init__(self, ctx: CloneContext):
         self.ctx = ctx

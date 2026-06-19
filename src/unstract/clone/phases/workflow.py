@@ -123,42 +123,37 @@ class WorkflowPhase(Phase):
         name = src["workflow_name"]
         src_id = src["id"]
 
+        # Collect every blocking dependency before skipping, so a workflow
+        # held up by both a skipped tool and a skipped connector reports both
+        # reasons in one pass rather than one per re-run.
+        skip_reasons: list[str] = []
         src_tool_id = self._wf_to_src_tool_id.get(src_id)
         if src_tool_id and src_tool_id in self.ctx.skipped_custom_tool_registry_ids:
-            logger.warning(
-                "skipping workflow '%s' src=%s — its tool was skipped in "
-                "custom_tool phase (frictionless adapter dependence)",
-                name,
-                src_id,
+            skip_reasons.append(
+                "its tool was skipped (frictionless adapter); wire equivalents "
+                "on target and re-run"
             )
-            with lock:
-                result.skipped += 1
-                result.warnings.append(
-                    f"workflow '{name}' skipped — its tool was skipped "
-                    "(frictionless adapter); wire equivalents on target and re-run"
-                )
-            return
-
         skipped_conns = (
             self._wf_to_connector_ids.get(src_id, set())
             & self.ctx.skipped_connector_ids
         )
         if skipped_conns:
+            skip_reasons.append(
+                "depends on un-clonable connector(s) "
+                f"({', '.join(sorted(skipped_conns))}); provision them on target "
+                "with the same name and re-run"
+            )
+        if skip_reasons:
             logger.warning(
-                "skipping workflow '%s' src=%s — endpoint connector(s) %s were "
-                "skipped (OAuth/redacted); cloning it would create pipelines that "
-                "fail every run",
+                "skipping workflow '%s' src=%s — %s",
                 name,
                 src_id,
-                ", ".join(sorted(skipped_conns)),
+                "; ".join(skip_reasons),
             )
             with lock:
                 result.skipped += 1
-                result.warnings.append(
-                    f"workflow '{name}' skipped — depends on un-clonable "
-                    "connector(s); provision them on target with the same name "
-                    "and re-run"
-                )
+                for reason in skip_reasons:
+                    result.warnings.append(f"workflow '{name}' skipped — {reason}")
             return
 
         try:

@@ -195,6 +195,36 @@ def test_cascade_skip_when_workflow_tool_was_skipped():
     assert [p["workflow_name"] for p in tgt.posts] == ["OK WF"]
     assert ctx.remap.resolve("workflow", "wf-skipped") is None
     assert ctx.remap.resolve("workflow", "wf-ok") is not None
+    assert any("its tool was skipped" in w for w in result.warnings)
+
+
+def test_dual_skip_reports_both_tool_and_connector_reasons():
+    """A workflow blocked by both a skipped tool and a skipped connector
+    surfaces both reasons in one pass, not one per re-run.
+    """
+    skipped_reg = "skipped-registry-id"
+    skipped_conn = "oauth-conn-id"
+    src = FakeClient([_src("wf-both", "Blocked WF")])
+    src.tool_instances = [{"workflow": "wf-both", "tool_id": skipped_reg}]
+    src.endpoints = [
+        {
+            "workflow": "wf-both",
+            "endpoint_type": "SOURCE",
+            "connector_instance": {"id": skipped_conn},
+        }
+    ]
+    tgt = FakeClient()
+    ctx = _ctx(src, tgt)
+    ctx.skipped_custom_tool_registry_ids.add(skipped_reg)
+    ctx.skipped_connector_ids.add(skipped_conn)
+
+    result = WorkflowPhase(ctx).run(CloneReport())
+
+    assert result.skipped == 1
+    assert tgt.posts == []
+    assert ctx.remap.resolve("workflow", "wf-both") is None
+    assert any("its tool was skipped" in w for w in result.warnings)
+    assert any("un-clonable connector" in w for w in result.warnings)
 
 
 def test_cascade_skip_when_endpoint_connector_skipped():

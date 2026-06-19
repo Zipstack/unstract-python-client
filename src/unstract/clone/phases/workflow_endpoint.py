@@ -141,30 +141,27 @@ class WorkflowEndpointPhase(Phase):
         tgt_ep_id = tgt_ep["id"]
         etype = src_ep["endpoint_type"]
 
-        # Resolve the connector before the dry-run gate so the plan mirrors
-        # the real run's unmapped-connector skip (an unmapped connector is
-        # left out of both counts, not predicted as a patch).
         src_conn_id = _extract_connector_id(src_ep)
         tgt_conn_id: str | None = None
+        connector_unmapped = False
         if src_conn_id:
             with lock:
                 tgt_conn_id = self.ctx.remap.resolve("connector", src_conn_id)
             if not tgt_conn_id:
+                # Connector wasn't cloned (e.g. OAuth). Still patch the
+                # connection_type so the endpoint is valid and the operator
+                # only needs to re-bind the connector — skipping the whole
+                # patch would leave connection_type empty and fail runs with
+                # "Invalid source connection type".
+                connector_unmapped = True
                 logger.warning(
-                    "skipping %s endpoint src=%s tgt=%s — source connector %s "
-                    "has no target remap; would silently unset connector",
+                    "%s endpoint src=%s tgt=%s: source connector %s has no "
+                    "target remap — setting type only, connector needs UI config",
                     etype,
                     src_ep_id,
                     tgt_ep_id,
                     src_conn_id,
                 )
-                with lock:
-                    result.skipped += 1
-                    result.errors.append(
-                        f"unmapped connector on {etype} endpoint {src_ep_id}: "
-                        f"src_connector={src_conn_id}"
-                    )
-                return
 
         if self.ctx.options.dry_run:
             with lock:
@@ -175,7 +172,7 @@ class WorkflowEndpointPhase(Phase):
                 etype,
                 src_ep_id,
                 tgt_ep_id,
-                tgt_conn_id,
+                tgt_conn_id or "<unset>",
             )
             return
 
@@ -183,11 +180,15 @@ class WorkflowEndpointPhase(Phase):
             "configuration": remap_uuids(
                 src_ep.get("configuration") or {}, self.ctx.remap
             ),
-            "connector_instance_id": tgt_conn_id,
         }
         src_connection_type = src_ep.get("connection_type")
         if src_connection_type is not None:
             payload["connection_type"] = src_connection_type
+        # Omit connector_instance_id only when the source connector couldn't be
+        # remapped, so the target keeps its connector for re-binding. A source
+        # with no connector (e.g. API) still patches null to clear any stale one.
+        if not connector_unmapped:
+            payload["connector_instance_id"] = tgt_conn_id
 
         try:
             self.ctx.target.update_workflow_endpoint(tgt_ep_id, payload)
@@ -203,10 +204,16 @@ class WorkflowEndpointPhase(Phase):
         with lock:
             result.created += 1
             self.ctx.remap.record("workflow_endpoint", src_ep_id, tgt_ep_id)
+            if connector_unmapped:
+                result.warnings.append(
+                    f"{etype} endpoint {src_ep_id}: connector not cloned "
+                    f"(src_connector={src_conn_id}) — connection_type set, "
+                    "configure the connector in the UI"
+                )
         logger.info(
             "patched %s endpoint src=%s -> tgt=%s (connector %s)",
             etype,
             src_ep_id,
             tgt_ep_id,
-            tgt_conn_id,
+            tgt_conn_id or "<unset>",
         )

@@ -145,6 +145,10 @@ class PipelinePhase(Phase):
             logger.info(
                 "created pipeline '%s' src=%s -> tgt=%s", name, src_id, tgt["id"]
             )
+            # Backend force-activates every pipeline on create; restore the
+            # source's disabled state so an inactive source pipeline doesn't
+            # start running (and failing) on the target's scheduler.
+            self._restore_active_state(full_src, tgt["id"], name)
             self._warn_if_extra_source_keys(src_id, name)
 
         with lock:
@@ -158,6 +162,25 @@ class PipelinePhase(Phase):
             lock=lock,
             src_detail_fn=lambda: self.ctx.source.get_pipeline(src_id),
         )
+
+    def _restore_active_state(
+        self, full_src: dict[str, Any], tgt_id: str, name: str
+    ) -> None:
+        # Only act when the source was inactive; created pipelines are already
+        # active. PATCHing active=False re-writes the scheduler job as disabled.
+        if full_src.get("active", True):
+            return
+        try:
+            self.ctx.target.update_pipeline(tgt_id, {"active": False})
+        except Exception as e:
+            logger.warning(
+                "pipeline '%s': could not restore inactive state — it will run "
+                "on schedule until disabled in the UI: %s",
+                name,
+                e,
+            )
+            return
+        logger.info("pipeline '%s': restored source inactive state on target", name)
 
     def _warn_if_extra_source_keys(self, src_pipeline_id: str, name: str) -> None:
         try:

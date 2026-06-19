@@ -21,7 +21,6 @@ from unstract.clone.exceptions import NameConflictError
 from unstract.clone.phases.workflow import WorkflowPhase
 from unstract.clone.report import CloneReport
 
-
 WORKFLOW_POST_SCHEMA = frozenset(
     {
         "workflow_name",
@@ -42,6 +41,7 @@ class FakeClient:
         self.workflows: list[dict] = list(workflows or [])
         self.posts: list[dict] = []
         self.tool_instances: list[dict] = []
+        self.endpoints: list[dict] = []
         self._next_id = 1
 
     def get_post_schema(self, entity_path: str) -> frozenset[str]:
@@ -63,6 +63,11 @@ class FakeClient:
         if workflow_id is None:
             return list(self.tool_instances)
         return [ti for ti in self.tool_instances if ti.get("workflow") == workflow_id]
+
+    def list_workflow_endpoints(self, *, workflow_id: str | None = None) -> list[dict]:
+        if workflow_id is None:
+            return list(self.endpoints)
+        return [e for e in self.endpoints if e.get("workflow") == workflow_id]
 
     def create_workflow(self, payload: dict) -> dict:
         new = dict(payload)
@@ -132,9 +137,7 @@ def test_happy_path_creates_workflow_and_remaps_connector_uuids():
 
 def test_idempotent_rerun_adopts_existing_workflow():
     src = FakeClient([_src("wf-src-1", "Invoice ETL")])
-    tgt = FakeClient(
-        [{"id": "wf-tgt-pre", "workflow_name": "Invoice ETL"}]
-    )
+    tgt = FakeClient([{"id": "wf-tgt-pre", "workflow_name": "Invoice ETL"}])
     ctx = _ctx(src, tgt, on_name_conflict="adopt")
 
     result = WorkflowPhase(ctx).run(CloneReport())
@@ -163,9 +166,7 @@ def test_dry_run_predicts_create_without_writing():
 
 def test_abort_on_name_conflict_raises():
     src = FakeClient([_src("wf-src-1", "Invoice ETL")])
-    tgt = FakeClient(
-        [{"id": "wf-tgt-pre", "workflow_name": "Invoice ETL"}]
-    )
+    tgt = FakeClient([{"id": "wf-tgt-pre", "workflow_name": "Invoice ETL"}])
     ctx = _ctx(src, tgt, on_name_conflict="abort")
 
     with pytest.raises(NameConflictError):
@@ -194,3 +195,66 @@ def test_cascade_skip_when_workflow_tool_was_skipped():
     assert [p["workflow_name"] for p in tgt.posts] == ["OK WF"]
     assert ctx.remap.resolve("workflow", "wf-skipped") is None
     assert ctx.remap.resolve("workflow", "wf-ok") is not None
+    assert any("its tool was skipped" in w for w in result.warnings)
+
+
+def test_dual_skip_reports_both_tool_and_connector_reasons():
+    """A workflow blocked by both a skipped tool and a skipped connector
+    surfaces both reasons in one pass, not one per re-run.
+    """
+    skipped_reg = "skipped-registry-id"
+    skipped_conn = "oauth-conn-id"
+    src = FakeClient([_src("wf-both", "Blocked WF")])
+    src.tool_instances = [{"workflow": "wf-both", "tool_id": skipped_reg}]
+    src.endpoints = [
+        {
+            "workflow": "wf-both",
+            "endpoint_type": "SOURCE",
+            "connector_instance": {"id": skipped_conn},
+        }
+    ]
+    tgt = FakeClient()
+    ctx = _ctx(src, tgt)
+    ctx.skipped_custom_tool_registry_ids.add(skipped_reg)
+    ctx.skipped_connector_ids.add(skipped_conn)
+
+    result = WorkflowPhase(ctx).run(CloneReport())
+
+    assert result.skipped == 1
+    assert tgt.posts == []
+    assert ctx.remap.resolve("workflow", "wf-both") is None
+    assert any("its tool was skipped" in w for w in result.warnings)
+    assert any("un-clonable connector" in w for w in result.warnings)
+
+
+def test_cascade_skip_when_endpoint_connector_skipped():
+    """Workflow whose endpoint uses an un-clonable (OAuth/redacted) connector
+    must not land on target — else its pipelines fail every run. Downstream
+    pipeline / api_deployment cascade off the missing workflow remap.
+    """
+    skipped_conn = "oauth-conn-id"
+    src = FakeClient([_src("wf-oauth", "Gdrive ETL"), _src("wf-ok", "OK WF")])
+    src.endpoints = [
+        {
+            "workflow": "wf-oauth",
+            "endpoint_type": "SOURCE",
+            "connector_instance": {"id": skipped_conn},
+        },
+        {
+            "workflow": "wf-ok",
+            "endpoint_type": "SOURCE",
+            "connector_instance": {"id": "good-conn"},
+        },
+    ]
+    tgt = FakeClient()
+    ctx = _ctx(src, tgt)
+    ctx.skipped_connector_ids.add(skipped_conn)
+
+    result = WorkflowPhase(ctx).run(CloneReport())
+
+    assert result.created == 1
+    assert result.skipped == 1
+    assert [p["workflow_name"] for p in tgt.posts] == ["OK WF"]
+    assert ctx.remap.resolve("workflow", "wf-oauth") is None
+    assert ctx.remap.resolve("workflow", "wf-ok") is not None
+    assert any("un-clonable" in w for w in result.warnings)

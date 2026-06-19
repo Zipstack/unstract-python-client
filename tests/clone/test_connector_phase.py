@@ -116,12 +116,14 @@ def test_redacted_metadata_connector_skipped():
     assert result.created == 0
     assert tgt.posts == []
     assert ctx.remap.resolve("connector", "src-ucs") is None
+    # Recorded for downstream cascade-skip + surfaced in the report.
+    assert ctx.skipped_connector_ids == {"src-ucs"}
+    assert any("User Storage" in w for w in result.warnings)
 
 
-def test_oauth_connector_skipped_before_post():
-    """OAuth-backed connectors (metadata carries access_token/refresh_token)
-    would fail target POST with OAuthTimeOut — skip ahead of POST so the
-    operator re-authorises post-clone.
+def test_oauth_connector_skipped_when_no_target_match():
+    """OAuth-backed connectors can't be recreated (credentials can't be cloned)
+    and aren't on the target yet — skip, record for cascade, warn.
     """
     oauth = _src("src-gdrive", "Unstract's google drive")
     oauth["connector_metadata"] = {
@@ -141,6 +143,41 @@ def test_oauth_connector_skipped_before_post():
     assert result.failed == 0
     assert tgt.posts == []
     assert ctx.remap.resolve("connector", "src-gdrive") is None
+    assert ctx.skipped_connector_ids == {"src-gdrive"}
+    assert any("OAuth" in w for w in result.warnings)
+
+
+def test_oauth_connector_adopted_when_target_exists():
+    """The recovery path: operator provisioned a same-name connector on the
+    target (where OAuth completes), so a re-run adopts it instead of skipping —
+    populating the remap so dependent endpoints wire.
+    """
+    oauth = _src("src-gdrive", "Unstract's google drive")
+    oauth["connector_metadata"] = {
+        "provider": "google-oauth2",
+        "access_token": "ya29.src-access",
+        "refresh_token": "1//src-refresh",
+    }
+    src = FakeClient([oauth])
+    tgt = FakeClient(
+        [
+            {
+                "id": "tgt-gdrive",
+                "connector_id": "gdrive|abc",
+                "connector_name": "Unstract's google drive",
+                "connector_type": "INPUT",
+                "connector_metadata": {"refresh_token": "1//tgt-refresh"},
+            }
+        ]
+    )
+    ctx = _ctx(src, tgt, on_name_conflict="adopt")
+
+    result = ConnectorPhase(ctx).run(CloneReport())
+
+    assert result.adopted == 1
+    assert result.skipped == 0
+    assert ctx.skipped_connector_ids == set()
+    assert ctx.remap.resolve("connector", "src-gdrive") == "tgt-gdrive"
 
 
 def test_idempotency_zero_creates_on_rerun():

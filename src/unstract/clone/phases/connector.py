@@ -1,19 +1,22 @@
 """Migrate connectors from source org to target org.
 
-Same list -> per-id GET -> POST/adopt pattern as AdapterPhase. Two
-connector-specific wrinkles:
+Same list -> per-id GET -> adopt/POST pattern as AdapterPhase, but a
+same-name target connector is adopted *before* any recreate attempt.
+Two connector-specific wrinkles make that ordering matter:
 
-1. **Connectors with redacted metadata are skipped.** Auto-provisioned
+1. **Redacted-metadata connectors can't be recreated.** Auto-provisioned
    rows (e.g. Unstract Cloud Storage) come back without
-   ``connector_metadata``, so the SDK cannot reconstruct them on the
-   target. We detect this by inspecting the source GET response:
-   a falsy ``connector_metadata`` means the operator must rely on the
-   target's own provisioning (or re-create the row manually) — the
-   remap table records no entry for these.
+   ``connector_metadata``, so the SDK has nothing to reconstruct.
 
-2. **OAuth ``connector_auth`` is stripped from responses.** OAuth refresh
-   tokens are never returned by the API, so OAuth-backed connectors land
-   on the target without them. Operator must re-authorise on target.
+2. **OAuth credentials can't be cloned.** OAuth refresh tokens are never
+   returned by the API, and a token can only be minted by completing the
+   OAuth flow as the target user — which only happens in the UI.
+
+Neither can be created from source. Both are skipped, their ids recorded
+so dependent workflows cascade-skip (avoiding pipelines that fail every
+run). The recovery path is the same for both: provision the connector on
+the target with the *same name*, then re-run — the adopt-first lookup
+picks it up and wires the dependent workflow endpoints.
 """
 
 from __future__ import annotations
@@ -83,31 +86,6 @@ class ConnectorPhase(Phase):
                 result.errors.append(f"GET source detail {name}: {e}")
             return
 
-        metadata = src.get("connector_metadata") or {}
-        if not metadata:
-            logger.info(
-                "skipping connector '%s' (src=%s, catalog=%s) — no source metadata",
-                name,
-                src_id,
-                src.get("connector_id"),
-            )
-            with lock:
-                result.skipped += 1
-            return
-
-        if _has_oauth_tokens(metadata):
-            logger.warning(
-                "skipping connector '%s' (src=%s, catalog=%s) — OAuth-backed; "
-                "re-authorise on target after the clone, then re-run to wire "
-                "dependent workflow endpoints.",
-                name,
-                src_id,
-                src.get("connector_id"),
-            )
-            with lock:
-                result.skipped += 1
-            return
-
         try:
             existing = self.ctx.target.list_connectors(name=name)
         except Exception as e:
@@ -117,6 +95,10 @@ class ConnectorPhase(Phase):
                 result.errors.append(f"GET {name}: {e}")
             return
 
+        # Adopt a same-name target connector before anything else. This is the
+        # only way OAuth / redacted-metadata connectors come across: the
+        # operator provisions one on the target (where OAuth can complete), and
+        # a re-run adopts it and wires dependent workflow endpoints.
         if existing:
             tgt = existing[0]
             if self.ctx.options.on_name_conflict == "abort":
@@ -131,30 +113,10 @@ class ConnectorPhase(Phase):
                 src_id,
                 tgt["id"],
             )
-        elif self.ctx.options.dry_run:
-            with lock:
-                result.created += 1
-                self.ctx.remap.record_planned("connector", src_id)
-            logger.info("[dry-run] would create connector '%s' src=%s", name, src_id)
-            return
         else:
-            payload = build_post_payload(src, self._writable)
-            try:
-                tgt = self.ctx.target.create_connector(payload)
-            except Exception as e:
-                logger.exception("Failed to create connector %s: %s", name, e)
-                with lock:
-                    result.failed += 1
-                    result.errors.append(f"create {name}: {e}")
+            tgt = self._recreate_or_skip(src, name, src_id, result, lock)
+            if tgt is None:
                 return
-            with lock:
-                result.created += 1
-            logger.info(
-                "created connector '%s' src=%s -> tgt=%s",
-                name,
-                src_id,
-                tgt["id"],
-            )
 
         with lock:
             self.ctx.remap.record("connector", src_id, tgt["id"])
@@ -162,3 +124,84 @@ class ConnectorPhase(Phase):
         self.apply_share(
             src=src, tgt_id=tgt["id"], label=name, result=result, lock=lock
         )
+
+    def _recreate_or_skip(
+        self,
+        src: dict[str, Any],
+        name: str,
+        src_id: str,
+        result: PhaseResult,
+        lock: threading.Lock,
+    ) -> dict[str, Any] | None:
+        """Recreate a connector from source, or skip when it can't be.
+
+        Returns the target connector dict on create, or ``None`` when the
+        connector is skipped (no metadata to reconstruct, or OAuth credentials
+        that the API can't clone). Skipped ids are recorded so dependent
+        workflows cascade-skip.
+        """
+        metadata = src.get("connector_metadata") or {}
+        if not metadata:
+            logger.info(
+                "skipping connector '%s' (src=%s, catalog=%s) — metadata not "
+                "exposed by the API (auto-provisioned, e.g. Cloud Storage); "
+                "provision it on the target with the same name and re-run to adopt",
+                name,
+                src_id,
+                src.get("connector_id"),
+            )
+            with lock:
+                result.skipped += 1
+                self.ctx.skipped_connector_ids.add(src_id)
+                result.warnings.append(
+                    f"connector '{name}' skipped — metadata not exposed by the API "
+                    "(auto-provisioned); provision it on target with the same name "
+                    "and re-run to adopt"
+                )
+            return None
+
+        if _has_oauth_tokens(metadata):
+            logger.warning(
+                "skipping connector '%s' (src=%s, catalog=%s) — OAuth-backed; "
+                "credentials can't be cloned. Recreate + authorise it on the "
+                "target with the same name, then re-run to adopt and wire "
+                "dependent workflows.",
+                name,
+                src_id,
+                src.get("connector_id"),
+            )
+            with lock:
+                result.skipped += 1
+                self.ctx.skipped_connector_ids.add(src_id)
+                result.warnings.append(
+                    f"connector '{name}' skipped — OAuth-backed, credentials can't "
+                    "be cloned; recreate + authorise on target with the same name, "
+                    "then re-run to adopt"
+                )
+            return None
+
+        if self.ctx.options.dry_run:
+            with lock:
+                result.created += 1
+                self.ctx.remap.record_planned("connector", src_id)
+            logger.info("[dry-run] would create connector '%s' src=%s", name, src_id)
+            return None
+
+        payload = build_post_payload(src, self._writable)
+        try:
+            tgt = self.ctx.target.create_connector(payload)
+        except Exception as e:
+            logger.exception("Failed to create connector %s: %s", name, e)
+            with lock:
+                result.failed += 1
+                result.errors.append(f"create {name}: {e}")
+            return None
+        with lock:
+            result.created += 1
+        logger.info(
+            "created connector '%s' src=%s -> tgt=%s",
+            name,
+            src_id,
+            tgt["id"],
+        )
+        return tgt

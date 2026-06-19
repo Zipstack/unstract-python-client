@@ -141,6 +141,11 @@ class CloneContext:
     # Source prompt_registry_ids whose CustomTool was skipped; used to
     # cascade-skip dependent workflows downstream.
     skipped_custom_tool_registry_ids: set[str] = field(default_factory=set)
+    # Source connector ids skipped because they can't be recreated via the API
+    # (OAuth-backed or redacted metadata) and no same-name target connector
+    # exists to adopt; workflows whose endpoints use one are cascade-skipped so
+    # the clone doesn't create pipelines that fail on every run.
+    skipped_connector_ids: set[str] = field(default_factory=set)
     # Per-run memo for users/groups directory listings (sharing replication
     # touches them once per endpoint, never per resource).
     share_cache: dict[str, Any] = field(default_factory=dict)

@@ -300,9 +300,7 @@ class CustomToolPhase(Phase):
                 if tgt_pid:
                     self.ctx.remap.record("prompt", sp["prompt_id"], tgt_pid)
 
-    def _record_planned_prompts(
-        self, src_tool_id: str, lock: threading.Lock
-    ) -> None:
+    def _record_planned_prompts(self, src_tool_id: str, lock: threading.Lock) -> None:
         """Dry-run: record a planned prompt remap per source prompt so
         prompt-scoped phases can resolve their FK and plan-count.
         """
@@ -507,6 +505,11 @@ class CustomToolPhase(Phase):
             src_regs = []
         with lock:
             result.skipped += 1
+            result.warnings.append(
+                f"tool '{tool_name}' skipped — default profile references adapters "
+                f"not available to clone ({', '.join(missing_adapters)}); wire "
+                "equivalents on target and re-run"
+            )
             for reg in src_regs:
                 reg_id = reg.get("prompt_registry_id")
                 if reg_id:

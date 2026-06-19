@@ -29,6 +29,14 @@ logger = logging.getLogger(__name__)
 WORKFLOW_PATH = "workflow/"
 
 
+def _endpoint_connector_id(endpoint: dict[str, Any]) -> str | None:
+    """``connector_instance`` is a nested dict on the endpoint listing."""
+    ci = endpoint.get("connector_instance")
+    if isinstance(ci, dict):
+        return ci.get("id")
+    return ci if isinstance(ci, str) else None
+
+
 class WorkflowPhase(Phase):
     name = "workflow"
     share_path_template = "workflow/{id}/share/"
@@ -53,6 +61,7 @@ class WorkflowPhase(Phase):
 
         # Built once so per-workflow cascade-skip checks stay O(1).
         self._wf_to_src_tool_id = self._collect_wf_tool_map(result)
+        self._wf_to_connector_ids = self._collect_wf_connector_map()
 
         logger.info("Found %d workflow(s) in source org", len(src_workflows))
         self.parallel_map(
@@ -84,6 +93,30 @@ class WorkflowPhase(Phase):
                 mapping[wf_id] = tool_id
         return mapping
 
+    def _collect_wf_connector_map(self) -> dict[str, set[str]]:
+        """Map source workflow_id to the connector ids its endpoints use,
+        from a single bulk endpoint listing. Only built when connectors were
+        skipped, so dependent workflows can cascade-skip.
+        """
+        if not self.ctx.skipped_connector_ids:
+            return {}
+        try:
+            endpoints = self.ctx.source.list_workflow_endpoints()
+        except Exception as e:
+            logger.warning(
+                "workflow phase: failed to list source endpoints for connector "
+                "cascade-skip (%s); proceeding without cascade",
+                e,
+            )
+            return {}
+        mapping: dict[str, set[str]] = {}
+        for ep in endpoints:
+            wf_id = ep.get("workflow")
+            conn_id = _endpoint_connector_id(ep)
+            if wf_id and conn_id:
+                mapping.setdefault(wf_id, set()).add(conn_id)
+        return mapping
+
     def _clone_one(
         self, src: dict[str, Any], result: PhaseResult, lock: threading.Lock
     ) -> None:
@@ -100,6 +133,32 @@ class WorkflowPhase(Phase):
             )
             with lock:
                 result.skipped += 1
+                result.warnings.append(
+                    f"workflow '{name}' skipped — its tool was skipped "
+                    "(frictionless adapter); wire equivalents on target and re-run"
+                )
+            return
+
+        skipped_conns = (
+            self._wf_to_connector_ids.get(src_id, set())
+            & self.ctx.skipped_connector_ids
+        )
+        if skipped_conns:
+            logger.warning(
+                "skipping workflow '%s' src=%s — endpoint connector(s) %s were "
+                "skipped (OAuth/redacted); cloning it would create pipelines that "
+                "fail every run",
+                name,
+                src_id,
+                ", ".join(sorted(skipped_conns)),
+            )
+            with lock:
+                result.skipped += 1
+                result.warnings.append(
+                    f"workflow '{name}' skipped — depends on un-clonable "
+                    "connector(s); provision them on target with the same name "
+                    "and re-run"
+                )
             return
 
         try:

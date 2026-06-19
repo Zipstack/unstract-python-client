@@ -1,19 +1,17 @@
 """Migrate WorkflowEndpoint rows from source org to target org.
 
 The backend auto-creates one SOURCE and one DESTINATION endpoint per
-workflow on workflow create (``perform_create`` in WorkflowViewSet), so
-there's nothing to POST — we only PATCH the target's existing endpoints
-with the source's connection_type, connector_instance, and configuration.
+workflow on workflow create, so there's nothing to POST — we only PATCH
+the target's existing endpoints with the source's connection_type,
+connector_instance, and configuration.
 
 Notes:
-- ``workflow`` and ``endpoint_type`` are ``editable=False`` server-side
-  and aren't writable on PATCH.
+- ``workflow`` and ``endpoint_type`` aren't writable on PATCH.
 - ``connector_instance`` FK is nullable; we remap via the connector
   remap table populated in ConnectorPhase.
 - ``configuration`` is a JSON blob that may embed connector UUIDs;
   walker pass remaps them before PATCH.
-- Source ``connector_instance`` arrives as a nested dict (per
-  ``WorkflowEndpointSerializer.connector_instance``); we extract its
+- Source ``connector_instance`` arrives as a nested dict; we extract its
   ``id`` and remap.
 """
 

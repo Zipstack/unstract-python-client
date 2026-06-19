@@ -1,20 +1,17 @@
 """Migrate ToolInstance rows from source org to target org.
 
-Each workflow holds at most one ToolInstance, enforced server-side
-(``tool_instance_v2/serializers.py`` raises if a workflow already has one).
+Each workflow holds at most one ToolInstance, enforced server-side.
 The row carries:
 
 - ``workflow`` FK — remapped from the WorkflowPhase remap table.
-- ``tool_id`` (CharField, not FK) — a ``prompt_registry_id`` UUID. The
-  target's registry was rebuilt in CustomToolPhase, so we remap via the
-  ``prompt_studio_registry`` table populated there.
-- ``metadata`` JSON — backend's ``create()`` discards the POST metadata
-  and rebuilds it from tool defaults. So we POST a bare instance, then
-  PATCH the metadata afterwards. Source metadata stores adapter values
-  as NAMES (via to_representation in source GET); on PATCH the backend's
-  ``update_metadata_with_adapter_instances`` resolves those names to
-  the target's adapter UUIDs. Names match across orgs because
-  AdapterPhase preserved them.
+- ``tool_id`` — a ``prompt_registry_id`` UUID. The target's registry was
+  rebuilt in CustomToolPhase, so we remap via the ``prompt_studio_registry``
+  table populated there.
+- ``metadata`` JSON — the create response carries default metadata rebuilt
+  from tool defaults, so we POST a bare instance then PATCH the metadata
+  afterwards. Source metadata stores adapter values as NAMES; on PATCH the
+  backend resolves those names to the target's adapter UUIDs. Names match
+  across orgs because AdapterPhase preserved them.
 """
 
 from __future__ import annotations
@@ -28,12 +25,11 @@ from unstract.clone.report import CloneReport, PhaseResult
 
 logger = logging.getLogger(__name__)
 
-# Source backend's ToolInstanceSerializer.to_representation emits these
-# sentinel strings when an adapter UUID/name in the stored metadata can
-# no longer be resolved (deleted or renamed on source). Round-tripping
-# them to target produces an AdapterNotFound on PATCH, so we detect and
-# skip the metadata PATCH instead — the ToolInstance row exists with the
-# backend's safe defaults and the operator can re-bind in the UI.
+# The source response emits these sentinel strings when an adapter UUID/name
+# in the stored metadata can no longer be resolved (deleted or renamed on
+# source). Round-tripping them to target produces an AdapterNotFound on PATCH,
+# so we detect and skip the metadata PATCH instead — the row exists with safe
+# defaults and the operator can re-bind in the UI.
 _BROKEN_ADAPTER_SENTINELS: tuple[str, ...] = (
     "NOT FOUND",
     "[DELETED ADAPTER",

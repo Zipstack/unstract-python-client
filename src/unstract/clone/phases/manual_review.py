@@ -2,31 +2,31 @@
 
 Cloud-only: gated by ``probe_path`` — the orchestrator probes
 ``manual_review/auto_approval_settings/`` on source/target and skips the
-phase entirely on an OSS deployment. ``auto_approval_settings/`` is a plain
-ModelViewSet ``list`` that 200s with no query params, so it is the only MR
-GET route safe to probe (the ``rule_engine`` / ``settings`` bare routes map
-to workflow-scoped actions that need a URL kwarg).
+phase entirely on an OSS deployment. ``auto_approval_settings/`` returns 200
+with no query params, so it is the only MR GET route safe to probe; the
+``rule_engine`` / ``settings`` routes are workflow-scoped and need a workflow
+id in the URL.
 
-Runs after ``workflow`` — every RuleEngine and HITLSettings row FKs a
+Runs after ``workflow`` — every review-rule and review-settings row FKs a
 workflow, so the workflow remap must already exist.
 
-Config only. Runtime/queue data (HITLQueue packets, edited_data,
+Config only. Runtime/queue data (review-queue packets, edited_data,
 highlights, documents) is deliberately out of scope.
 
 Three passes:
 
 1. **Per-workflow** — for each source workflow that has a target mapping,
-   replay its RuleEngine rows (one per ``rule_type``, with nested
-   ``confidence_filters``) and its HITLSettings row, rebinding ``workflow``
+   replay its review rules (one per ``rule_type``, with nested
+   ``confidence_filters``) and its review-settings row, rebinding ``workflow``
    to the target id. Adopt-by-presence on the target.
-2. **AutoApprovalSettings** — org-level, cloned once. ``auto_approved_users``
+2. **Auto-approval settings** — org-level, cloned once. ``auto_approved_users``
    holds source-org user pks; remapped by email (same as share replication).
    ``auto_approved_document_classes`` holds workflow/class-name strings with no
    reliable cross-org remap; carried verbatim with a warning.
 
-MR config rows (RuleEngine/HITLSettings/AutoApprovalSettings) are workflow- or
-org-scoped and inherit visibility from there — no per-entity share replication.
-3. **ReviewApiKey** — recreated (the secret is server-minted and cannot be
+These config rows are workflow- or org-scoped and inherit visibility from
+there — no per-entity share replication.
+3. **Review API keys** — recreated (the secret is server-minted and cannot be
    copied); operator is warned to re-wire external consumers.
 """
 
@@ -48,8 +48,8 @@ logger = logging.getLogger(__name__)
 
 AUTO_APPROVAL_PATH = "manual_review/auto_approval_settings/"
 
-# RuleEngine create fields (RuleEngineSerializer, minus server-managed id /
-# created_by / modified_by). ``confidence_filters`` is nested.
+# Review-rule create fields (server-managed id / created_by / modified_by
+# excluded); ``confidence_filters`` is nested.
 _RULE_FIELDS: tuple[str, ...] = (
     "rule_type",
     "percentage",
@@ -57,10 +57,10 @@ _RULE_FIELDS: tuple[str, ...] = (
     "rule_json",
     "rule_logic",
 )
-# ConfidenceFilterSerializer create fields (id is server-managed).
+# Confidence-filter create fields (id server-managed).
 _FILTER_FIELDS: tuple[str, ...] = ("field_key", "confidence_threshold")
-# HITLSettingsSerializer is ``__all__``; these are the writable, non-FK-leaking
-# fields (workflow is rebound separately; the rest are server-managed).
+# HITL-settings writable fields (workflow rebound separately; rest
+# server-managed).
 _SETTINGS_FIELDS: tuple[str, ...] = ("sync_with", "ttl_hours")
 
 
@@ -240,7 +240,7 @@ class ManualReviewPhase(Phase):
             )
             return
 
-        # HITLSettings is OneToOne on workflow — adopt if one already exists.
+        # Review settings are one-per-workflow — adopt if one already exists.
         if not self.ctx.remap.is_planned(tgt_wf_id):
             try:
                 existing = self.ctx.target.get_review_settings(tgt_wf_id)
@@ -377,7 +377,7 @@ class ManualReviewPhase(Phase):
                     f"auto-approval: user {email} not found in target org — skipped"
                 )
                 continue
-            # Stored as CharField (str) ids in the ArrayField.
+            # The field holds string ids.
             mapped.append(str(tgt_uid))
         return mapped
 
@@ -401,8 +401,9 @@ class ManualReviewPhase(Phase):
             logger.info("[dry-run] would recreate %d review api key(s)", len(src_keys))
             return
 
-        # ReviewApiKey has no cross-org natural key (api_key is server-minted),
-        # so adopt by (class_name, description) to stay idempotent on re-runs.
+        # Review API keys have no cross-org natural key (api_key is
+        # server-minted), so adopt by (class_name, description) to stay
+        # idempotent on re-runs.
         try:
             tgt_keys = self.ctx.target.list_review_api_keys()
         except Exception as e:

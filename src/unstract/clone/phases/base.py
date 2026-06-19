@@ -18,13 +18,12 @@ T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
 
-# DRF OPTIONS reports any ModelSerializer FK/M2M as writable, but the
-# backend's perform_create overrides these server-side. Posting them is
-# either noise (silently overwritten) or a 400 (when a source-org value
-# doesn't validate against the target org). Strip them universally —
-# the phase OPTIONS schema covers the entity-specific writable subset.
-# ``shared_users`` stays stripped on create — share state is replicated
-# post-create instead (see sharing.py).
+# OPTIONS reports any FK/M2M as writable, but the backend overrides these
+# server-side on create. Posting them is either noise (silently overwritten)
+# or a 400 (when a source-org value doesn't validate against the target org).
+# Strip them universally — the phase OPTIONS schema covers the entity-specific
+# writable subset. ``shared_users`` stays stripped on create — share state is
+# replicated post-create instead (see sharing.py).
 SERVER_MANAGED: frozenset[str] = frozenset(
     {
         "id",

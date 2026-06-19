@@ -15,7 +15,7 @@ Two passes:
    semantics of the files phase). Records a ``lookup_definition`` remap.
 
 2. **Assignments** — after every lookup + prompt remap exists, replay the
-   PromptLookupAssignment rows. Each row's source prompt FK remaps via the
+   prompt-lookup assignment rows. Each row's source prompt FK remaps via the
    ``custom_tool`` phase's ``prompt`` table; its target version resolves via
    the ``lookup_version`` remap (recorded by the version replay below — draft
    pins fall back to the cloned lookup's ``draft_version_id``);
@@ -433,9 +433,9 @@ class LookupsPhase(Phase):
             name, src_lookup_id, tgt_lookup_id, src_version_id, detail, result, lock
         )
 
-        # assignment_values_snapshot is derived by the backend at publish time
-        # from then-existing assignments; publishing happens before assignments
-        # are recreated, so historical snapshots may differ from source.
+        # Frozen assignment-value snapshots are captured at publish time from
+        # then-existing assignments; publishing happens before assignments are
+        # recreated, so historical snapshots may differ from source.
         # Structure + pinning reproduce; frozen values are best-effort.
         try:
             published = self.ctx.target.publish_lookup_version(
@@ -700,7 +700,7 @@ class LookupsPhase(Phase):
             return
 
         # Index existing target assignments by target prompt id (one per prompt)
-        # to honor the ``one_lookup_per_prompt`` uniqueness on re-runs.
+        # to honor that uniqueness on re-runs.
         existing_by_prompt: dict[str, dict[str, Any]] = {}
         if not self.ctx.options.dry_run:
             try:

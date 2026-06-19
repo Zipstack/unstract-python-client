@@ -6,7 +6,7 @@ For each source tool the phase:
    portable JSON blob (tool_metadata, tool_settings,
    default_profile_settings, prompts, export_metadata).
 2. Decides fresh vs adopt by looking up the target tool by name.
-3. **Fresh path**: reads source's default ProfileManager to learn the
+3. **Fresh path**: reads the source's default adapter profile to learn the
    adapter UUIDs the profile is bound to, remaps each via the running
    ``adapter`` remap table, and POSTs the import as a multipart upload
    with target-org adapter ids on the form. Backend creates the tool,
@@ -15,9 +15,9 @@ For each source tool the phase:
    Backend rip-and-replaces prompts + ``tool_settings`` and leaves the
    target's locally-configured profiles + adapters untouched (which is
    what the operator wants — they may have rewired adapters on target).
-5. Republishes ``PromptStudioRegistry`` via the export action and
+5. Republishes the tool's registry entry via the export action and
    records the ``custom_tool`` + ``prompt_studio_registry`` remaps so
-   downstream ToolInstancePhase can rewrite ``ToolInstance.tool_id``.
+   downstream ToolInstancePhase can rewrite the tool instance's tool id.
    Skipped for tools with no source registry entry (never exported —
    e.g. empty projects, which the backend refuses to export).
 
@@ -27,7 +27,7 @@ basis. Any that can't be resolved are left unconfigured — the backend
 imports the tool with a partial/empty profile and flags
 ``needs_adapter_config`` for the operator to finish wiring on target
 and re-run. Frictionless-bound tools (adapters not even visible to the
-source service account) are the exception: cloud-only with no target
+source org's Platform key) are the exception: cloud-only with no target
 equivalent, so they are skipped + cascade.
 """
 
@@ -86,7 +86,7 @@ class CustomToolPhase(Phase):
             result.errors.append(f"list target tools: {e}")
             return result
 
-        # Source's service-account view hides frictionless adapters; a
+        # The source's visible adapter set hides frictionless adapters; a
         # profile-referenced name missing here flags a tool we can't migrate.
         try:
             self._src_adapter_names = {
@@ -176,7 +176,7 @@ class CustomToolPhase(Phase):
 
         # Map source prompt ids -> target prompt ids by prompt_key so
         # prompt-scoped phases (e.g. lookup assignments) can rewrite their
-        # ToolStudioPrompt FKs. Target prompts already exist here (created by
+        # prompt FKs. Target prompts already exist here (created by
         # import_project on fresh, sync_prompts on adopt).
         self._remap_prompts(src_tool_id, tgt_tool_id, tool_name, lock)
 
@@ -489,7 +489,7 @@ class CustomToolPhase(Phase):
         """
         logger.warning(
             "skipping tool '%s' src=%s — default profile references adapters "
-            "not visible to the source service account (frictionless?): %s. "
+            "not visible to this org's adapter listing (frictionless?): %s. "
             "Wire equivalents on target and re-run.",
             tool_name,
             src_tool_id,

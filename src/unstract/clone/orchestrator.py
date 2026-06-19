@@ -60,7 +60,7 @@ PHASES: list[tuple[str, type[Phase]]] = [
     # auto-skips on OSS deployments via ``probe_path``.
     ("lookups", LookupsPhase),
     ("workflow", WorkflowPhase),
-    # Cloud-only; FKs the workflow (RuleEngine / HITLSettings bind to it).
+    # Cloud-only; review rules and settings bind to the workflow.
     # Probe-gated: auto-skips on OSS deployments via ``probe_path``.
     ("manual_review", ManualReviewPhase),
     ("tool_instance", ToolInstancePhase),

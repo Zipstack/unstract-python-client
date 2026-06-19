@@ -23,11 +23,11 @@ Per source project:
      resolves through it. ``project`` is bound to the target id.
    - **schemas**: bound to the target ``project`` and created.
 3. **Registry**: if the project has an active schema + prompt, republish its
-   ``AgenticStudioRegistry`` via the ``export`` action (mirror of custom_tool)
-   and record an ``agentic_studio_registry`` remap. Projects with no source
+   registry entry via the ``export`` action (mirror of custom_tool) and
+   record an ``agentic_studio_registry`` remap. Projects with no source
    registry are left unexported.
 
-Org-level ``AgenticSetting`` rows (global key/value, no project FK) are cloned
+Org-level agentic-setting rows (global key/value, no project FK) are cloned
 once as a flat adopt-by-key / create pass — they are org singletons, not
 per-project config.
 """
@@ -217,10 +217,11 @@ class AgenticStudioPhase(Phase):
         lock: threading.Lock,
     ) -> None:
         # The list row already carries shared_users / shared_groups /
-        # shared_to_org, so no detail fetch is needed. Share axes are read-only
-        # on the serializer (a detail PATCH is a silent no-op); they're written
-        # via the dedicated share action, which handles the polymorphic group
-        # axis too — so groups replicate like every other shared resource.
+        # shared_to_org, so no detail fetch needed. Share axes are
+        # write-protected on the detail endpoint (a detail PATCH is a silent
+        # no-op); they're written via the dedicated share action, which handles
+        # the group axis too — so groups replicate like every other shared
+        # resource.
         apply_share_state(
             self.ctx,
             share_path=f"agentic/projects/{tgt_project_id}/share/",
@@ -575,9 +576,9 @@ class AgenticStudioPhase(Phase):
                     self.ctx.target.create_agentic_setting(payload)
                     result.created += 1
             except Exception as e:
-                # `key` is globally unique across orgs, so a create can collide
-                # with a row owned by another org that isn't in this org's
-                # listing — not data loss the clone can resolve. Warn, don't fail.
+                # An agentic-setting key can collide with a row this org's
+                # listing doesn't surface — not data loss the clone can
+                # resolve. Warn, don't fail.
                 logger.warning("agentic setting '%s' not replicated: %s", key, e)
                 result.skipped += 1
                 result.warnings.append(

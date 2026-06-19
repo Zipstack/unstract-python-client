@@ -3,18 +3,17 @@
 Same list -> per-id GET -> POST/adopt pattern as AdapterPhase. Two
 connector-specific wrinkles:
 
-1. **Connectors with redacted metadata are skipped.** The backend
-   serializer strips ``connector_metadata`` for auto-provisioned rows
-   (e.g. Unstract Cloud Storage), so the SDK cannot reconstruct them
-   on the target. We detect this by inspecting the source GET response:
+1. **Connectors with redacted metadata are skipped.** Auto-provisioned
+   rows (e.g. Unstract Cloud Storage) come back without
+   ``connector_metadata``, so the SDK cannot reconstruct them on the
+   target. We detect this by inspecting the source GET response:
    a falsy ``connector_metadata`` means the operator must rely on the
    target's own provisioning (or re-create the row manually) — the
    remap table records no entry for these.
 
-2. **OAuth ``connector_auth`` is stripped from responses.** Tokens are
-   stored in a sibling ``ConnectorAuth`` row that the public API never
-   exposes, so OAuth-backed connectors land on the target without
-   refresh tokens. Operator must re-authorise on target.
+2. **OAuth ``connector_auth`` is stripped from responses.** OAuth refresh
+   tokens are never returned by the API, so OAuth-backed connectors land
+   on the target without them. Operator must re-authorise on target.
 """
 
 from __future__ import annotations
@@ -31,9 +30,9 @@ logger = logging.getLogger(__name__)
 
 CONNECTOR_PATH = "connector/"
 
-# Backend POST serializer trips on these keys (connector_v2/serializers.py)
-# by trying to refresh against the source user's social auth — guaranteed
-# OAuthTimeOut on target. Detect here and skip ahead of POST.
+# A POST carrying these OAuth token keys triggers a token refresh against
+# the source user's credentials — guaranteed to fail on the target. Detect
+# here and skip ahead of POST.
 _OAUTH_TOKEN_KEYS: frozenset[str] = frozenset({"access_token", "refresh_token"})
 
 

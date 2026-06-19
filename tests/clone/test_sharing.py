@@ -55,9 +55,8 @@ def test_share_payload_maps_users_groups_and_org_flag():
     src_client = FakeClient(
         users=[
             {"id": "7", "email": "alice@x.com"},
-            # service account via email-suffix fallback (no flag in row)
-            {"id": "8", "email": "svc@platform.internal"},
-            # service account via backend flag (email alone wouldn't tell)
+            # service accounts flagged by the backend; email alone wouldn't tell
+            {"id": "8", "email": "svc@x.com", "is_service_account": True},
             {"id": "9", "email": "bot@x.com", "is_service_account": True},
         ]
     )

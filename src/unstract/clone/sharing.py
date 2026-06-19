@@ -23,8 +23,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SHARE_AXES: tuple[str, ...] = ("shared_users", "shared_groups", "shared_to_org")
-# Platform-key identities; they exist per-org and never map across orgs.
-SERVICE_ACCOUNT_EMAIL_SUFFIX = "@platform.internal"
 
 _FETCH_FAILED = object()  # cache sentinel so a failing listing isn't re-hit
 
@@ -32,14 +30,10 @@ _FETCH_FAILED = object()  # cache sentinel so a failing listing isn't re-hit
 def is_service_account(row: dict[str, Any]) -> bool:
     """True if a user/member listing row is a service account.
 
-    Email-suffix fallback covers older backends without the flag;
-    mis-classification is benign — a service-account email never matches
-    across orgs, so worst case is a spurious skip-warning.
+    These identities are per-org and never map across orgs, so they are
+    skipped during share replication.
     """
-    flag = row.get("is_service_account")
-    if flag is not None:
-        return bool(flag)
-    return (row.get("email") or "").lower().endswith(SERVICE_ACCOUNT_EMAIL_SUFFIX)
+    return bool(row.get("is_service_account"))
 
 
 def _cached(ctx: CloneContext, key: str, build: Callable[[], Any]) -> Any:

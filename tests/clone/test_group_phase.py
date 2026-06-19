@@ -129,9 +129,8 @@ def test_member_cloning_matches_by_email_and_skips_missing():
             1: [
                 {"user_id": 7, "email": "alice@x.com"},
                 {"user_id": 8, "email": "ghost@x.com"},  # not in target org
-                # service acct via email-suffix fallback (no flag in row)
-                {"user_id": 9, "email": "svc@platform.internal"},
-                # service acct via backend flag (email alone wouldn't tell)
+                # service accts flagged by the backend; email alone wouldn't tell
+                {"user_id": 9, "email": "svc@x.com", "is_service_account": True},
                 {"user_id": 10, "email": "bot@x.com", "is_service_account": True},
             ]
         },
@@ -151,7 +150,7 @@ def test_member_cloning_matches_by_email_and_skips_missing():
     assert tgt.member_posts == [(tgt_group_id, [70])]
     assert any("ghost@x.com" in w for w in result.warnings)
     # service accounts are skipped silently, not warned about
-    assert not any("platform.internal" in w for w in result.warnings)
+    assert not any("svc@x.com" in w for w in result.warnings)
     assert not any("bot@x.com" in w for w in result.warnings)
 
 

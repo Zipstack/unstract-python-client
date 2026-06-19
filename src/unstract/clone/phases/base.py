@@ -18,13 +18,12 @@ T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
 
-# DRF OPTIONS reports any ModelSerializer FK/M2M as writable, but the
-# backend's perform_create overrides these server-side. Posting them is
-# either noise (silently overwritten) or a 400 (when a source-org value
-# doesn't validate against the target org). Strip them universally —
-# the phase OPTIONS schema covers the entity-specific writable subset.
-# ``shared_users`` stays stripped on create — share state is replicated
-# post-create instead (see sharing.py).
+# OPTIONS reports any FK/M2M as writable, but the backend overrides these
+# server-side on create. Posting them is either noise (silently overwritten)
+# or a 400 (when a source-org value doesn't validate against the target org).
+# Strip them universally — the phase OPTIONS schema covers the entity-specific
+# writable subset. ``shared_users`` stays stripped on create — share state is
+# replicated post-create instead (see sharing.py).
 SERVER_MANAGED: frozenset[str] = frozenset(
     {
         "id",
@@ -61,6 +60,11 @@ class Phase(ABC):
     # Share endpoint template for shareable resource types, e.g.
     # "adapter/{id}/share/" ({id} = target pk). None = not shareable.
     share_path_template: str | None = None
+    # Capability-gate for cloud-only phases. When set, the orchestrator probes
+    # this list endpoint on source/target before running and applies the skip
+    # matrix (source absent → silent skip; target absent → warn + skip). Core
+    # OSS phases leave it None and always run (no probe call at all).
+    probe_path: str | None = None
 
     def __init__(self, ctx: CloneContext):
         self.ctx = ctx

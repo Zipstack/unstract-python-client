@@ -55,9 +55,8 @@ def test_share_payload_maps_users_groups_and_org_flag():
     src_client = FakeClient(
         users=[
             {"id": "7", "email": "alice@x.com"},
-            # service account via email-suffix fallback (no flag in row)
-            {"id": "8", "email": "svc@platform.internal"},
-            # service account via backend flag (email alone wouldn't tell)
+            # service accounts flagged by the backend; email alone wouldn't tell
+            {"id": "8", "email": "svc@x.com", "is_service_account": True},
             {"id": "9", "email": "bot@x.com", "is_service_account": True},
         ]
     )
@@ -171,6 +170,23 @@ def test_share_dry_run_never_posts():
     )
 
     assert tgt_client.share_posts == []
+
+
+def test_share_dry_run_planned_group_remap_does_not_crash():
+    # In dry-run the group remap resolves to a synthetic uuid (planned), not
+    # an int pk — building the payload must not int()-cast and blow up.
+    ctx = _ctx(FakeClient(), FakeClient(), dry_run=True)
+    ctx.remap.record_planned("group", "1")
+    planned = ctx.remap.resolve("group", "1")
+
+    result = _apply(
+        ctx,
+        {"shared_users": [], "shared_groups": [1], "shared_to_org": False},
+    )
+
+    assert ctx.target.share_posts == []  # dry-run never posts
+    assert not result.errors
+    assert ctx.remap.is_planned(planned)
 
 
 def test_share_fetches_source_detail_when_axes_missing_from_list_row():

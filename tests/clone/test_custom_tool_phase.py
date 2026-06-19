@@ -9,7 +9,9 @@ Coverage:
 - registry remap recorded after ``export_custom_tool``.
 - dry-run: no writes on either side.
 - abort on name conflict when option is set.
-- missing target adapter fails the tool cleanly.
+- incomplete source tools (missing target adapter / no profile) mirror
+  unconfigured instead of failing; frictionless adapters still skip.
+- registry republish 500 warns, doesn't fail the tool.
 """
 
 from __future__ import annotations
@@ -49,6 +51,7 @@ class FakeClient:
         self.export_blobs: dict[str, dict] = {}
         self.registries_by_tool: dict[str, dict] = {}
         self.adapters_by_name: dict[str, dict] = {}
+        self.prompts_by_tool: dict[str, list[dict]] = {}
         # Call recorders.
         self.import_calls: list[tuple[dict, dict | None]] = []
         self.sync_calls: list[tuple[str, dict, bool]] = []
@@ -90,7 +93,17 @@ class FakeClient:
         reg = self.registries_by_tool.get(custom_tool)
         return [reg] if reg else []
 
+    def list_prompts(self, tool_id: str) -> list[dict]:
+        return list(self.prompts_by_tool.get(tool_id, []))
+
     # --- writes ---
+    _REQUIRED_ADAPTER_FIELDS = (
+        "llm_adapter_id",
+        "vector_db_adapter_id",
+        "embedding_adapter_id",
+        "x2text_adapter_id",
+    )
+
     def import_project(
         self, export_data: dict, adapter_ids: dict | None = None
     ) -> dict:
@@ -98,10 +111,14 @@ class FakeClient:
         tool_id = self._mint("tool")
         tool_name = export_data["tool_metadata"]["tool_name"]
         self.tools[tool_id] = {"tool_name": tool_name}
+        # Backend flags needs_adapter_config unless all four are wired.
+        fully_wired = bool(adapter_ids) and all(
+            adapter_ids.get(k) for k in self._REQUIRED_ADAPTER_FIELDS
+        )
         return {
             "tool_id": tool_id,
             "message": f"Project imported successfully as '{tool_name}'",
-            "needs_adapter_config": adapter_ids is None,
+            "needs_adapter_config": not fully_wired,
         }
 
     def sync_prompts(
@@ -223,7 +240,8 @@ def test_fresh_imports_with_name_resolved_adapter_ids_and_records_registry():
 
     assert result.created == 1
     assert result.failed == 0
-    # Exactly one import_project call with the right export blob + name-resolved adapter ids.
+    # Exactly one import_project call with the right export blob + name-resolved
+    # adapter ids.
     assert len(tgt.import_calls) == 1
     blob, adapter_ids = tgt.import_calls[0]
     assert blob["tool_metadata"]["tool_name"] == "Invoice Extractor"
@@ -396,7 +414,11 @@ def test_never_exported_source_tool_skips_registry_republish():
     assert ctx.remap.resolve("prompt_studio_registry", SRC_REG) is None
 
 
-def test_missing_target_adapter_fails_tool_cleanly():
+def test_missing_target_adapter_imports_unconfigured():
+    """A source adapter with no target match isn't fatal: the tool is
+    mirrored with a partial adapter set, flagged needs_adapter_config, and
+    a warning tells the operator to wire it + re-run.
+    """
     src = FakeClient()
     tgt = FakeClient()
     _preload_source_tool(src, "src-tool-x", "T")
@@ -408,9 +430,106 @@ def test_missing_target_adapter_fails_tool_cleanly():
 
     result = CustomToolPhase(ctx).run(CloneReport())
 
-    assert result.failed == 1
-    assert tgt.import_calls == []
-    # Registry republish should NOT fire when the tool fails.
-    assert tgt.export_tool_calls == []
-    # No custom_tool remap recorded.
-    assert ctx.remap.resolve("custom_tool", "src-tool-x") is None
+    assert result.created == 1
+    assert result.failed == 0
+    # Import fired with the 3 resolvable adapters; x2text omitted.
+    assert len(tgt.import_calls) == 1
+    _, adapter_ids = tgt.import_calls[0]
+    assert adapter_ids == {
+        "llm_adapter_id": TGT_ADAPTER_IDS["gpt4"],
+        "vector_db_adapter_id": TGT_ADAPTER_IDS["pgvector"],
+        "embedding_adapter_id": TGT_ADAPTER_IDS["ada-embed"],
+    }
+    assert "x2text_adapter_id" not in adapter_ids
+    assert any("full adapter config" in w for w in result.warnings)
+    # Source had a registry → still republished + remap recorded.
+    assert tgt.export_tool_calls == [ctx.remap.resolve("custom_tool", "src-tool-x")]
+
+
+def test_no_default_profile_imports_unconfigured():
+    """A source tool with no profiles can't derive adapter ids; mirror it
+    anyway (backend auto-creates an unconfigured default profile) rather
+    than failing the whole clone.
+    """
+    src = FakeClient()
+    tgt = FakeClient()
+    _preload_source_tool(src, "src-tool-x", "Profileless")
+    src.profiles_by_tool["src-tool-x"] = []  # no default profile on source
+    _seed_source_adapters(src)
+    _seed_target_adapters(tgt)
+    ctx = _ctx(src, tgt)
+
+    result = CustomToolPhase(ctx).run(CloneReport())
+
+    assert result.created == 1
+    assert result.failed == 0
+    # Imported with an empty adapter set (no profile to derive from).
+    assert tgt.import_calls == [(src.export_blobs["src-tool-x"], {})]
+    assert any("full adapter config" in w for w in result.warnings)
+    assert ctx.remap.resolve("custom_tool", "src-tool-x") is not None
+
+
+def test_republish_failure_warns_not_fails():
+    """A registry republish 500 (e.g. stale/empty source registry) must not
+    fail the whole tool — the tool itself cloned; downstream tool_instances
+    just cascade-skip.
+    """
+    src = FakeClient()
+    tgt = FakeClient()
+    _preload_source_tool(src, "src-tool-x", "Stale Registry Tool")
+    _seed_source_adapters(src)
+    _seed_target_adapters(tgt)
+
+    def boom(tool_id, *, force=True):
+        raise RuntimeError("500 export failed: no run prompts")
+
+    tgt.export_custom_tool = boom
+    ctx = _ctx(src, tgt)
+
+    result = CustomToolPhase(ctx).run(CloneReport())
+
+    # Tool cloned; republish failure is a warning, not a failure.
+    assert result.created == 1
+    assert result.failed == 0
+    assert any("republish" in w for w in result.warnings)
+    # Tool remap recorded; registry remap absent (republish never landed).
+    assert ctx.remap.resolve("custom_tool", "src-tool-x") is not None
+    assert ctx.remap.resolve("prompt_studio_registry", SRC_REG) is None
+
+
+def test_remap_prompts_maps_src_to_tgt_by_prompt_key():
+    import threading
+
+    src = FakeClient()
+    tgt = FakeClient()
+    src.prompts_by_tool["src-tool"] = [
+        {"prompt_id": "sp1", "prompt_key": "k1"},
+        {"prompt_id": "sp2", "prompt_key": "k2"},
+    ]
+    tgt.prompts_by_tool["tgt-tool"] = [
+        {"prompt_id": "tp1", "prompt_key": "k1"},
+        {"prompt_id": "tp2", "prompt_key": "k2"},
+    ]
+    ctx = _ctx(src, tgt)
+
+    CustomToolPhase(ctx)._remap_prompts(
+        "src-tool", "tgt-tool", "T", threading.Lock()
+    )
+
+    assert ctx.remap.resolve("prompt", "sp1") == "tp1"
+    assert ctx.remap.resolve("prompt", "sp2") == "tp2"
+
+
+def test_record_planned_prompts_records_synthetic_remaps():
+    import threading
+
+    src = FakeClient()
+    src.prompts_by_tool["src-tool"] = [
+        {"prompt_id": "sp1", "prompt_key": "k1"},
+    ]
+    ctx = _ctx(src, FakeClient(), dry_run=True)
+
+    CustomToolPhase(ctx)._record_planned_prompts("src-tool", threading.Lock())
+
+    planned = ctx.remap.resolve("prompt", "sp1")
+    assert planned is not None and ctx.remap.is_planned(planned)

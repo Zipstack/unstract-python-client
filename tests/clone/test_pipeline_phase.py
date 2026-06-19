@@ -45,6 +45,7 @@ class FakeClient:
     def __init__(self, pipelines: list[dict] | None = None):
         self.pipelines: list[dict] = list(pipelines or [])
         self.posts: list[dict] = []
+        self.patches: list[tuple[str, dict]] = []
         self.keys_by_pipeline: dict[str, list[dict]] = {}
         self._next = 1
 
@@ -74,6 +75,14 @@ class FakeClient:
         self.pipelines.append(new)
         self.posts.append(new)
         return new
+
+    def update_pipeline(self, pipeline_id: str, payload: dict) -> dict:
+        self.patches.append((pipeline_id, payload))
+        for p in self.pipelines:
+            if p["id"] == pipeline_id:
+                p.update(payload)
+                return dict(p)
+        raise KeyError(pipeline_id)
 
     def list_pipeline_keys(self, pipeline_id: str) -> list[dict]:
         return list(self.keys_by_pipeline.get(pipeline_id, []))
@@ -170,6 +179,38 @@ def test_create_uses_per_id_get_not_stripped_list_payload():
     # cron_string only existed on the detail GET — proves we did NOT
     # POST the stripped list-item payload.
     assert posted["cron_string"] == "0 5 * * *"
+
+
+def test_inactive_source_pipeline_deactivated_on_target():
+    # Backend force-activates on create; an inactive source pipeline must be
+    # patched back to inactive so its schedule doesn't run on the target.
+    pl = _src_pipeline("src-pl-1", "Disabled ETL", "wf-src-1", cron_string="0 5 * * *")
+    pl["active"] = False
+    src = FakeClient([pl])
+    tgt = FakeClient()
+    remap = RemapTable()
+    remap.record("workflow", "wf-src-1", "wf-tgt-1")
+    ctx = _ctx(src, tgt, remap=remap)
+
+    result = PipelinePhase(ctx).run(CloneReport())
+
+    assert result.created == 1
+    posted = tgt.posts[0]
+    assert tgt.patches == [(posted["id"], {"active": False})]
+
+
+def test_active_source_pipeline_not_patched():
+    src = FakeClient(
+        [_src_pipeline("src-pl-1", "Live ETL", "wf-src-1", cron_string="0 5 * * *")]
+    )
+    tgt = FakeClient()
+    remap = RemapTable()
+    remap.record("workflow", "wf-src-1", "wf-tgt-1")
+    ctx = _ctx(src, tgt, remap=remap)
+
+    PipelinePhase(ctx).run(CloneReport())
+
+    assert tgt.patches == []
 
 
 def test_default_and_app_pipeline_types_are_skipped():

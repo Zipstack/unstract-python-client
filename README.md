@@ -150,6 +150,17 @@ failed run can be resumed by re-running the same command.
 | `1` | Completed with failures — see the printed report. |
 | `2` | Could not run (setup error or `--on-name-conflict=abort` collision). |
 
+#### Compatibility
+
+`unstract clone` is capability-probed: each phase checks for its endpoint on the
+source and target, and clones only what both orgs support. A capability missing on
+either side is reported and skipped — the run never fails because of a version
+difference. Cloning a newer source into an older target therefore drops the entity
+types the target lacks (listed in the end-of-run report).
+
+- Run the source and target on the same (or a newer-target) Unstract build.
+- Use `unstract-client >= 1.4.0`, the first release that ships `unstract clone`.
+
 ## Questions and Feedback
 
 On Slack, [join great conversations](https://join-slack.unstract.com/) around LLMs, their ecosystem and leveraging them to automate the previously unautomatable!

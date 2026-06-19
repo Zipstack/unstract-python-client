@@ -5,7 +5,8 @@ POST. Tests verify that the SDK:
 - pairs source/target endpoints by ``endpoint_type``;
 - remaps the embedded ``connector_instance`` UUID;
 - walker-rewrites UUIDs nested in ``configuration``;
-- silently leaves connector_instance_id null when no remap exists.
+- sets connection_type even when a connector has no remap (connector left
+  unset for the operator to re-bind).
 """
 
 from __future__ import annotations
@@ -179,10 +180,12 @@ def test_endpoint_without_source_connector_patches_with_null():
     assert payload["configuration"] == {"foo": "bar"}
 
 
-def test_unknown_connector_uuid_skips_endpoint_and_flags_error():
-    """Source had a connector but its remap is missing — patching with
-    connector=None would silently detach the endpoint on target. Skip
-    the PATCH and record an operator-visible error entry instead.
+def test_unmapped_connector_still_sets_connection_type_and_warns():
+    """Source had a connector but its remap is missing (e.g. an OAuth
+    connector that couldn't be cloned). The phase still patches
+    connection_type so the endpoint is valid at runtime, omits the
+    connector (operator re-binds in the UI), and records a warning rather
+    than failing the run with "Invalid source connection type".
     """
     src = FakeClient()
     src.endpoints[SRC_WF] = [
@@ -199,10 +202,14 @@ def test_unknown_connector_uuid_skips_endpoint_and_flags_error():
 
     result = WorkflowEndpointPhase(ctx).run(CloneReport())
 
-    assert result.created == 0
-    assert result.skipped == 1
-    assert tgt.patch_calls == []
-    assert any("unmapped connector" in e for e in result.errors)
+    assert result.created == 1
+    assert result.skipped == 0
+    assert result.failed == 0
+    assert len(tgt.patch_calls) == 1
+    _, payload = tgt.patch_calls[0]
+    assert payload["connection_type"] == "FILESYSTEM"
+    assert "connector_instance_id" not in payload
+    assert any("connector not cloned" in w for w in result.warnings)
 
 
 def test_missing_target_endpoint_fails_loudly():

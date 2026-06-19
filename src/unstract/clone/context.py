@@ -145,3 +145,20 @@ class CloneContext:
     # touches them once per endpoint, never per resource).
     share_cache: dict[str, Any] = field(default_factory=dict)
     share_cache_lock: threading.Lock = field(default_factory=threading.Lock)
+    # Capability-probe memo: (id(client), feature_path) -> present?. Probed
+    # once per (deployment, feature) so cloud-phase gating costs one GET total.
+    probe_cache: dict[tuple[int, str], bool] = field(default_factory=dict)
+
+    def feature_present(self, client: "PlatformClient", path: str) -> bool:
+        """Is ``path`` (a feature's list endpoint) installed on ``client``?
+
+        Memoised per run. Plain dict, no lock — probing runs in the
+        single-threaded orchestrator loop, before any parallel_map fan-out.
+        """
+        key = (id(client), path)
+        cached = self.probe_cache.get(key)
+        if cached is not None:
+            return cached
+        present = client.probe(path)
+        self.probe_cache[key] = present
+        return present

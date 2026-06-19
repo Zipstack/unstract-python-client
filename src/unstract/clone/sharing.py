@@ -23,8 +23,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SHARE_AXES: tuple[str, ...] = ("shared_users", "shared_groups", "shared_to_org")
-# Platform-key identities; they exist per-org and never map across orgs.
-SERVICE_ACCOUNT_EMAIL_SUFFIX = "@platform.internal"
 
 _FETCH_FAILED = object()  # cache sentinel so a failing listing isn't re-hit
 
@@ -32,14 +30,10 @@ _FETCH_FAILED = object()  # cache sentinel so a failing listing isn't re-hit
 def is_service_account(row: dict[str, Any]) -> bool:
     """True if a user/member listing row is a service account.
 
-    Email-suffix fallback covers older backends without the flag;
-    mis-classification is benign — a service-account email never matches
-    across orgs, so worst case is a spurious skip-warning.
+    These identities are per-org and never map across orgs, so they are
+    skipped during share replication.
     """
-    flag = row.get("is_service_account")
-    if flag is not None:
-        return bool(flag)
-    return (row.get("email") or "").lower().endswith(SERVICE_ACCOUNT_EMAIL_SUFFIX)
+    return bool(row.get("is_service_account"))
 
 
 def _cached(ctx: CloneContext, key: str, build: Callable[[], Any]) -> Any:
@@ -89,27 +83,21 @@ def target_user_id_by_email(ctx: CloneContext) -> dict[str, int] | None:
     return None if value is _FETCH_FAILED else value
 
 
-def apply_share_state(
+def _resolve_share_src(
     ctx: CloneContext,
-    *,
-    share_path: str,
-    entity_label: str,
     src: dict[str, Any],
+    entity_label: str,
     result: PhaseResult,
     lock: threading.Lock,
-    src_detail_fn: Callable[[], dict[str, Any]] | None = None,
-) -> None:
-    """Mirror ``src``'s share state onto the target resource at ``share_path``.
-
-    ``src`` may be a stripped list-row; when any share axis is missing and
-    ``src_detail_fn`` is given, the source detail is fetched once. No-ops
-    when the effective share state is empty. Never raises — failures land
-    in ``result.errors`` (counted) and skips in ``result.warnings``.
+    src_detail_fn: Callable[[], dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Return the source row carrying share axes, fetching the detail once
+    when ``src`` is a stripped list-row. ``None`` signals a fetch failure
+    (already warned) — caller should abort.
     """
-    share_src = src
-    if src_detail_fn is not None and not all(k in share_src for k in SHARE_AXES):
+    if src_detail_fn is not None and not all(k in src for k in SHARE_AXES):
         try:
-            share_src = src_detail_fn()
+            return src_detail_fn()
         except Exception as e:
             logger.warning("share %s: source detail fetch failed: %s", entity_label, e)
             with lock:
@@ -117,8 +105,24 @@ def apply_share_state(
                     f"share {entity_label}: source detail fetch failed — "
                     f"share state not replicated: {e}"
                 )
-            return
+            return None
+    return src
 
+
+def _build_share_payload(
+    ctx: CloneContext,
+    share_src: dict[str, Any],
+    entity_label: str,
+    result: PhaseResult,
+    lock: threading.Lock,
+    *,
+    include_groups: bool = True,
+) -> dict[str, Any] | None:
+    """Map ``share_src``'s axes to target ids (groups via remap, users by
+    email). Returns the share payload, or ``None`` when there is nothing to
+    replicate. ``include_groups=False`` omits the group axis entirely (for
+    entities whose serializer has no writable ``shared_groups``).
+    """
     shared_to_org = bool(share_src.get("shared_to_org"))
     src_group_ids = list(share_src.get("shared_groups") or [])
     src_user_ids = list(share_src.get("shared_users") or [])
@@ -127,25 +131,34 @@ def apply_share_state(
     payload: dict[str, Any] = {"shared_to_org": shared_to_org}
 
     group_warnings: list[str] = []
-    if src_group_ids and not ctx.options.includes("group"):
-        # Axis omitted entirely so the target's group shares are untouched.
+    if include_groups:
+        if src_group_ids and not ctx.options.includes("group"):
+            # Axis omitted entirely so the target's group shares are untouched.
+            group_warnings.append(
+                f"share {entity_label}: group phase excluded — "
+                f"{len(src_group_ids)} group share(s) not replicated"
+            )
+        else:
+            mapped_groups: list[Any] = []
+            for gid in src_group_ids:
+                tgt_gid = ctx.remap.resolve("group", str(gid))
+                if tgt_gid is None:
+                    group_warnings.append(
+                        f"share {entity_label}: source group id {gid} has no "
+                        "target mapping — skipped"
+                    )
+                else:
+                    # Real group pks are ints; dry-run planned remaps are
+                    # synthetic uuids (never POSTed) — keep those as-is.
+                    mapped_groups.append(
+                        int(tgt_gid) if str(tgt_gid).isdigit() else tgt_gid
+                    )
+            payload["shared_groups"] = mapped_groups
+    elif src_group_ids:
         group_warnings.append(
-            f"share {entity_label}: group phase excluded — "
-            f"{len(src_group_ids)} group share(s) not replicated"
+            f"share {entity_label}: {len(src_group_ids)} group share(s) not "
+            "supported by this entity — not replicated"
         )
-        mapped_groups: list[int] | None = None
-    else:
-        mapped_groups = []
-        for gid in src_group_ids:
-            tgt_gid = ctx.remap.resolve("group", str(gid))
-            if tgt_gid is None:
-                group_warnings.append(
-                    f"share {entity_label}: source group id {gid} has no "
-                    "target mapping — skipped"
-                )
-            else:
-                mapped_groups.append(int(tgt_gid))
-        payload["shared_groups"] = mapped_groups
 
     user_warnings: list[str] = []
     mapped_users: list[int] = []
@@ -187,30 +200,68 @@ def apply_share_state(
 
     if not mapped_users and not payload.get("shared_groups") and not shared_to_org:
         logger.debug("share %s: nothing to replicate", entity_label)
-        return
+        return None
+    return payload
 
+
+def replicate_share(
+    ctx: CloneContext,
+    *,
+    apply_fn: Callable[[dict[str, Any]], Any],
+    entity_label: str,
+    src: dict[str, Any],
+    result: PhaseResult,
+    lock: threading.Lock,
+    src_detail_fn: Callable[[], dict[str, Any]] | None = None,
+    include_groups: bool = True,
+) -> None:
+    """Map ``src``'s share state and hand the payload to ``apply_fn`` (the
+    entity-specific write — a ``/share/`` POST or a detail PATCH). Generic
+    over the write mechanism so PATCH-shared cloud entities reuse the same
+    user/group mapping. Never raises.
+    """
+    share_src = _resolve_share_src(ctx, src, entity_label, result, lock, src_detail_fn)
+    if share_src is None:
+        return
+    payload = _build_share_payload(
+        ctx, share_src, entity_label, result, lock, include_groups=include_groups
+    )
+    if payload is None:
+        return
     if ctx.options.dry_run:
-        logger.info(
-            "[dry-run] would share %s: users=%s groups=%s org=%s",
-            entity_label,
-            mapped_users,
-            payload.get("shared_groups"),
-            shared_to_org,
-        )
+        logger.info("[dry-run] would share %s: %s", entity_label, payload)
         return
-
     try:
-        ctx.target.share_resource(share_path, payload)
+        apply_fn(payload)
     except Exception as e:
         logger.exception("Failed to apply share state for %s: %s", entity_label, e)
         with lock:
             result.failed += 1
             result.errors.append(f"share {entity_label}: {e}")
         return
-    logger.info(
-        "shared %s: users=%s groups=%s org=%s",
-        entity_label,
-        mapped_users,
-        payload.get("shared_groups"),
-        shared_to_org,
+    logger.info("shared %s: %s", entity_label, payload)
+
+
+def apply_share_state(
+    ctx: CloneContext,
+    *,
+    share_path: str,
+    entity_label: str,
+    src: dict[str, Any],
+    result: PhaseResult,
+    lock: threading.Lock,
+    src_detail_fn: Callable[[], dict[str, Any]] | None = None,
+) -> None:
+    """Mirror ``src``'s share state onto the target resource via its
+    ``/share/`` POST endpoint at ``share_path``. Thin wrapper over
+    ``replicate_share`` preserving the original POST behavior.
+    """
+    replicate_share(
+        ctx,
+        apply_fn=lambda payload: ctx.target.share_resource(share_path, payload),
+        entity_label=entity_label,
+        src=src,
+        result=result,
+        lock=lock,
+        src_detail_fn=src_detail_fn,
     )

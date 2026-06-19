@@ -129,9 +129,9 @@ class WorkflowPhase(Phase):
             logger.info("[dry-run] would create workflow '%s' src=%s", name, src_id)
             return
         else:
-            # List endpoints serve stripped payloads (e.g. AdapterListSerializer
-            # omits adapter_metadata_b); workflow detail carries the JSON blobs
-            # source_settings / destination_settings that embed connector UUIDs.
+            # List endpoints serve stripped payloads; the workflow detail
+            # carries the JSON blobs source_settings / destination_settings
+            # that embed connector UUIDs.
             try:
                 src_detail = self.ctx.source.get_workflow(src_id)
             except Exception as e:

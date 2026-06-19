@@ -43,6 +43,9 @@ class CloneReport:
     dry_run: bool = False
     phases: list[PhaseResult] = field(default_factory=list)
     skipped_phases: list[str] = field(default_factory=list)
+    # Run-level non-fatal warnings not tied to any one phase (e.g. a cloud
+    # phase skipped because the target deployment lacks the feature).
+    warnings: list[str] = field(default_factory=list)
     remap_snapshot: dict[str, dict[str, str]] = field(default_factory=dict)
     aborted: bool = False
     abort_reason: str | None = None
@@ -224,6 +227,7 @@ class CloneReport:
                 for p in self.phases
             ],
             "skipped_phases": list(self.skipped_phases),
+            "warnings": list(self.warnings),
             "remap_snapshot": self.remap_snapshot,
             "aborted": self.aborted,
             "abort_reason": self.abort_reason,
@@ -336,6 +340,8 @@ class CloneReport:
 
     def _render_warnings_summary(self, console_print: Any, rich: bool) -> None:
         rows: list[tuple[str, str]] = []
+        for warning in self.warnings:
+            rows.append(("run", warning))
         for p in self.phases:
             for warning in p.warnings:
                 rows.append((p.name, warning))

@@ -4,9 +4,8 @@ Reference implementation for the get-or-create pattern: list-by-name GET
 against target, POST create if missing, record source->target UUID in the
 remap table for downstream phases.
 
-Frictionless onboarding adapters are excluded — the backend's
-service-account queryset already filters them out, so clone never
-sees them.
+Frictionless onboarding adapters are excluded — they're already filtered
+out of what this org's Platform key can list, so clone never sees them.
 """
 
 from __future__ import annotations

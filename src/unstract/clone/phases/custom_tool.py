@@ -6,7 +6,7 @@ For each source tool the phase:
    portable JSON blob (tool_metadata, tool_settings,
    default_profile_settings, prompts, export_metadata).
 2. Decides fresh vs adopt by looking up the target tool by name.
-3. **Fresh path**: reads source's default ProfileManager to learn the
+3. **Fresh path**: reads the source's default adapter profile to learn the
    adapter UUIDs the profile is bound to, remaps each via the running
    ``adapter`` remap table, and POSTs the import as a multipart upload
    with target-org adapter ids on the form. Backend creates the tool,
@@ -15,16 +15,20 @@ For each source tool the phase:
    Backend rip-and-replaces prompts + ``tool_settings`` and leaves the
    target's locally-configured profiles + adapters untouched (which is
    what the operator wants — they may have rewired adapters on target).
-5. Republishes ``PromptStudioRegistry`` via the export action and
+5. Republishes the tool's registry entry via the export action and
    records the ``custom_tool`` + ``prompt_studio_registry`` remaps so
-   downstream ToolInstancePhase can rewrite ``ToolInstance.tool_id``.
+   downstream ToolInstancePhase can rewrite the tool instance's tool id.
    Skipped for tools with no source registry entry (never exported —
    e.g. empty projects, which the backend refuses to export).
 
-Adapter id discovery for the fresh path needs all four of LLM,
-vector_db, embedding, x2text. If any source adapter can't be resolved
-via the adapter remap, the tool is failed cleanly — we never want to
-land a half-wired profile.
+Adapter id discovery for the fresh path resolves each of LLM,
+vector_db, embedding, x2text via the adapter remap on a best-effort
+basis. Any that can't be resolved are left unconfigured — the backend
+imports the tool with a partial/empty profile and flags
+``needs_adapter_config`` for the operator to finish wiring on target
+and re-run. Frictionless-bound tools (adapters not even visible to the
+source org's Platform key) are the exception: cloud-only with no target
+equivalent, so they are skipped + cascade.
 """
 
 from __future__ import annotations
@@ -82,7 +86,7 @@ class CustomToolPhase(Phase):
             result.errors.append(f"list target tools: {e}")
             return result
 
-        # Source's service-account view hides frictionless adapters; a
+        # The source's visible adapter set hides frictionless adapters; a
         # profile-referenced name missing here flags a tool we can't migrate.
         try:
             self._src_adapter_names = {
@@ -167,7 +171,14 @@ class CustomToolPhase(Phase):
             # needs a prompt_studio_registry remap to plan-count. Mirror it
             # with a planned id derived from the source registry (read-only).
             self._record_planned_registry(src_tool_id, tool_name, lock)
+            self._record_planned_prompts(src_tool_id, lock)
             return
+
+        # Map source prompt ids -> target prompt ids by prompt_key so
+        # prompt-scoped phases (e.g. lookup assignments) can rewrite their
+        # prompt FKs. Target prompts already exist here (created by
+        # import_project on fresh, sync_prompts on adopt).
+        self._remap_prompts(src_tool_id, tgt_tool_id, tool_name, lock)
 
         # Tools never exported on source (e.g. empty projects — backend
         # blocks their export) have no registry entry and no workflow
@@ -199,10 +210,16 @@ class CustomToolPhase(Phase):
                 "republished registry for tool '%s' tgt=%s", tool_name, tgt_tool_id
             )
         except Exception as e:
-            logger.exception("Registry republish failed for tool %s: %s", tool_name, e)
+            # Republish can 500 on incomplete/stale source registries (e.g.
+            # empty run prompts). The tool itself cloned fine; only its
+            # registry entry is missing, so downstream tool_instances
+            # cascade-skip. Warn rather than fail the whole tool.
+            logger.warning("Registry republish failed for tool '%s': %s", tool_name, e)
             with lock:
-                result.failed += 1
-                result.errors.append(f"export {tool_name}: {e}")
+                result.warnings.append(
+                    f"republish {tool_name}: skipped ({e}) — downstream tool "
+                    "instances will cascade-skip until re-published"
+                )
             return
 
         try:
@@ -250,6 +267,58 @@ class CustomToolPhase(Phase):
             self.ctx.remap.record_planned(
                 "prompt_studio_registry", src_regs[0]["prompt_registry_id"]
             )
+
+    def _remap_prompts(
+        self,
+        src_tool_id: str,
+        tgt_tool_id: str,
+        tool_name: str,
+        lock: threading.Lock,
+    ) -> None:
+        """Record source->target prompt-id remaps, matched by prompt_key.
+
+        Best-effort: a prompt without a matching key on target is skipped
+        (the dependent phase counts it as unresolved), and a listing
+        failure leaves the remap empty rather than failing the tool.
+        """
+        try:
+            src_prompts = self.ctx.source.list_prompts(src_tool_id)
+            tgt_prompts = self.ctx.target.list_prompts(tgt_tool_id)
+        except Exception as e:
+            logger.warning(
+                "prompt-id remap skipped for tool '%s' "
+                "(dependent prompt-scoped phases may under-resolve): %s",
+                tool_name,
+                e,
+            )
+            return
+        # prompt_key is effectively unique per tool; first match wins.
+        tgt_by_key = {p["prompt_key"]: p["prompt_id"] for p in tgt_prompts}
+        with lock:
+            for sp in src_prompts:
+                tgt_pid = tgt_by_key.get(sp["prompt_key"])
+                if tgt_pid:
+                    self.ctx.remap.record("prompt", sp["prompt_id"], tgt_pid)
+
+    def _record_planned_prompts(
+        self, src_tool_id: str, lock: threading.Lock
+    ) -> None:
+        """Dry-run: record a planned prompt remap per source prompt so
+        prompt-scoped phases can resolve their FK and plan-count.
+        """
+        try:
+            src_prompts = self.ctx.source.list_prompts(src_tool_id)
+        except Exception as e:
+            logger.warning(
+                "[dry-run] source prompt listing failed for tool %s "
+                "(prompt-scoped plan may under-count): %s",
+                src_tool_id,
+                e,
+            )
+            return
+        with lock:
+            for sp in src_prompts:
+                self.ctx.remap.record_planned("prompt", sp["prompt_id"])
 
     def _adopt(
         self,
@@ -306,29 +375,26 @@ class CustomToolPhase(Phase):
         result: PhaseResult,
         lock: threading.Lock,
     ) -> str | None:
-        # Run the source-side validations even in dry-run — they decide
-        # whether a real run would create or frictionless-skip, so the plan
-        # counts must reflect them. Only the target-write steps are stubbed.
+        # Run the source-side checks even in dry-run — they decide whether a
+        # real run would create or frictionless-skip, so plan counts must
+        # reflect them. Only the target-write steps are stubbed.
         default_profile = self._source_default_profile(src_tool_id, tool_name)
-        if default_profile is None:
-            with lock:
-                result.failed += 1
-                result.errors.append(
-                    f"import {tool_name}: no default profile on source"
-                )
-            return None
 
-        invisible = self._invisible_source_adapter_names(default_profile)
-        if invisible:
-            self._register_frictionless_skip(
-                src_tool_id, tool_name, invisible, result, lock
-            )
-            return None
+        # Frictionless adapters are cloud-only with no target equivalent —
+        # skip + cascade. Only checkable when a default profile exists; a
+        # profile-less tool is mirrored unconfigured (below).
+        if default_profile is not None:
+            invisible = self._invisible_source_adapter_names(default_profile)
+            if invisible:
+                self._register_frictionless_skip(
+                    src_tool_id, tool_name, invisible, result, lock
+                )
+                return None
 
         if self.ctx.options.dry_run:
             # Target adapter resolution is skipped: adapters this run would
-            # create don't exist on target yet, so it can't resolve. The
-            # frictionless check above already caught the real skip cases.
+            # create don't exist on target yet. The frictionless check above
+            # already caught the real skip cases.
             with lock:
                 result.created += 1
                 tgt_tool_id = self.ctx.remap.record_planned("custom_tool", src_tool_id)
@@ -337,14 +403,15 @@ class CustomToolPhase(Phase):
             )
             return tgt_tool_id
 
-        adapter_ids = self._resolve_target_adapter_ids(default_profile, tool_name)
-        if adapter_ids is None:
-            with lock:
-                result.failed += 1
-                result.errors.append(
-                    f"import {tool_name}: missing target adapter remap for default"
-                )
-            return None
+        # Best-effort adapter wiring: resolve what maps, leave the rest
+        # unconfigured. The backend tolerates a partial/empty set and flags
+        # needs_adapter_config — mirror an incomplete source tool rather than
+        # fail the clone (operator finishes wiring on target and re-runs).
+        adapter_ids = (
+            self._resolve_target_adapter_ids(default_profile, tool_name)
+            if default_profile is not None
+            else {}
+        )
 
         try:
             tgt = self.ctx.target.import_project(export_data, adapter_ids=adapter_ids)
@@ -356,15 +423,21 @@ class CustomToolPhase(Phase):
             return None
 
         tgt_tool_id = tgt["tool_id"]
+        needs_cfg = tgt.get("needs_adapter_config")
         with lock:
             result.created += 1
             self.ctx.remap.record("custom_tool", src_tool_id, tgt_tool_id)
+            if needs_cfg:
+                result.warnings.append(
+                    f"tool {tool_name}: imported without full adapter config — "
+                    "wire adapters on target and re-run to complete downstream"
+                )
         logger.info(
             "created tool '%s' src=%s -> tgt=%s (needs_adapter_config=%s)",
             tool_name,
             src_tool_id,
             tgt_tool_id,
-            tgt.get("needs_adapter_config"),
+            needs_cfg,
         )
         return tgt_tool_id
 
@@ -416,7 +489,7 @@ class CustomToolPhase(Phase):
         """
         logger.warning(
             "skipping tool '%s' src=%s — default profile references adapters "
-            "not visible to the source service account (frictionless?): %s. "
+            "not visible to this org's adapter listing (frictionless?): %s. "
             "Wire equivalents on target and re-run.",
             tool_name,
             src_tool_id,
@@ -441,14 +514,15 @@ class CustomToolPhase(Phase):
 
     def _resolve_target_adapter_ids(
         self, default_profile: dict[str, Any], tool_name: str
-    ) -> dict[str, str] | None:
+    ) -> dict[str, str]:
         """Source profile carries adapter NAMES (per serializer); resolve
-        each name to a target adapter UUID via ``list_adapters(name=...)``.
+        each to a target adapter UUID via ``list_adapters(name=...)``.
 
-        Returns ``None`` if any of the four required adapters can't be
-        found on target — caller fails the tool. AdapterPhase preserves
-        names across orgs so this lookup should always hit when the
-        adapter clone ran cleanly.
+        Best-effort: adapters that can't be resolved are omitted (not fatal).
+        The backend tolerates a partial/empty set and flags
+        ``needs_adapter_config``. AdapterPhase preserves names across orgs,
+        so a miss means the adapter wasn't cloned (frictionless, or a failed
+        adapter clone) — the operator wires it on target and re-runs.
         """
         resolved: dict[str, str] = {}
         for src_field, form_field in _PROFILE_ADAPTER_FIELDS:
@@ -459,7 +533,7 @@ class CustomToolPhase(Phase):
                     tool_name,
                     src_field,
                 )
-                return None
+                continue
             try:
                 matches = self.ctx.target.list_adapters(name=adapter_name)
             except Exception as e:
@@ -469,14 +543,15 @@ class CustomToolPhase(Phase):
                     tool_name,
                     e,
                 )
-                return None
+                continue
             if not matches:
                 logger.warning(
-                    "no target adapter named '%s' for field %s on tool '%s'",
+                    "no target adapter named '%s' for field %s on tool '%s' — "
+                    "left unconfigured",
                     adapter_name,
                     src_field,
                     tool_name,
                 )
-                return None
+                continue
             resolved[form_field] = matches[0]["id"]
         return resolved

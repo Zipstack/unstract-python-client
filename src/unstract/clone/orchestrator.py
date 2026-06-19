@@ -19,11 +19,14 @@ from unstract.clone.context import CloneContext, CloneOptions, OrgEndpoint
 from unstract.clone.exceptions import CloneError
 from unstract.clone.phases import (
     AdapterPhase,
+    AgenticStudioPhase,
     APIDeploymentPhase,
     ConnectorPhase,
     CustomToolPhase,
     FilesPhase,
     GroupPhase,
+    LookupsPhase,
+    ManualReviewPhase,
     PipelinePhase,
     TagPhase,
     ToolInstancePhase,
@@ -46,16 +49,56 @@ logger = logging.getLogger(__name__)
 PHASES: list[tuple[str, type[Phase]]] = [
     ("group", GroupPhase),
     ("adapter", AdapterPhase),
+    # Cloud-only; standalone (own project + registry) and FKs four adapters.
+    # Probe-gated: auto-skips on OSS deployments via ``probe_path``.
+    ("agentic_studio", AgenticStudioPhase),
     ("connector", ConnectorPhase),
     ("tag", TagPhase),
     ("custom_tool", CustomToolPhase),
     ("files", FilesPhase),
+    # Cloud-only; consumes custom_tool's prompt + adapter remaps. Probe-gated:
+    # auto-skips on OSS deployments via ``probe_path``.
+    ("lookups", LookupsPhase),
     ("workflow", WorkflowPhase),
+    # Cloud-only; review rules and settings bind to the workflow.
+    # Probe-gated: auto-skips on OSS deployments via ``probe_path``.
+    ("manual_review", ManualReviewPhase),
     ("tool_instance", ToolInstancePhase),
     ("workflow_endpoint", WorkflowEndpointPhase),
     ("pipeline", PipelinePhase),
     ("api_deployment", APIDeploymentPhase),
 ]
+
+
+def _cloud_phase_runnable(
+    ctx: CloneContext, report: CloneReport, name: str, probe_path: str
+) -> bool:
+    """Decide whether a cloud-only phase should run on this deployment pair.
+
+    Probe source first; only probe target if source has the feature. A probe
+    failure (unexpected status / transport) must not abort an otherwise-fine
+    run — treat it like target-absent: warn + skip, never raise.
+    """
+    try:
+        if not ctx.feature_present(ctx.source, probe_path):
+            # OSS source: behave exactly as if this phase didn't exist.
+            logger.debug("Phase '%s' skipped: feature absent on source", name)
+            return False
+        target_present = ctx.feature_present(ctx.target, probe_path)
+    except Exception as e:
+        msg = f"Phase '{name}' skipped: capability probe failed ({e})"
+        logger.warning(msg)
+        report.warnings.append(msg)
+        return False
+    if not target_present:
+        msg = (
+            f"Phase '{name}' skipped: feature present on source but not on "
+            "target deployment"
+        )
+        logger.warning(msg)
+        report.warnings.append(msg)
+        return False
+    return True
 
 
 def clone(
@@ -92,6 +135,11 @@ def clone(
             if not opts.includes(name):
                 report.skipped_phases.append(name)
                 logger.info("Phase '%s' skipped (excluded)", name)
+                continue
+            probe_path = getattr(phase_cls, "probe_path", None)
+            if probe_path is not None and not _cloud_phase_runnable(
+                ctx, report, name, probe_path
+            ):
                 continue
             logger.info("=== Phase: %s ===", name)
             phase_started = time.perf_counter()

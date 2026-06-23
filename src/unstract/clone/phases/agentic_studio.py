@@ -559,6 +559,17 @@ class AgenticStudioPhase(Phase):
         if not src_rows:
             return
 
+        # Verified data FKs a document; under 'skip' no documents are copied,
+        # so skip the rows too — matching the plan and _clone_documents.
+        if self.ctx.options.file_strategy == "skip":
+            with lock:
+                result.skipped += len(src_rows)
+                result.warnings.append(
+                    f"agentic {name}: {len(src_rows)} verified-data row(s) not "
+                    "copied (file_strategy=skip)"
+                )
+            return
+
         # Verified data FKs a document; map source rows to target docs by
         # filename, the only identity stable across orgs.
         try:

@@ -963,3 +963,20 @@ class PlatformClient:
         return self._request(
             "POST", f"agentic/projects/{project_id}/documents/upload/", files=files
         )
+
+    def list_agentic_verified_data(self, project_id: str) -> list[dict[str, Any]]:
+        """List a project's verified (ground-truth) data rows. Each carries
+        ``document_name``, ``document``, and ``data`` (the curated JSON).
+        """
+        result = self._request(
+            "GET", "agentic/verified-data/", params={"project_id": project_id}
+        )
+        return result if isinstance(result, list) else (result or {}).get("results", [])
+
+    def create_agentic_verified_data(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create a verified-data row (``project``, ``document``, ``data``).
+
+        One row per (project, document); callers pre-check to avoid a
+        uniqueness clash on re-runs.
+        """
+        return self._request("POST", "agentic/verified-data/", json=payload)

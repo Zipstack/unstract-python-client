@@ -41,6 +41,7 @@ class FakeClient:
         users=None,
         documents=None,
         document_blobs=None,
+        verified_data=None,
     ):
         self.projects = list(projects or [])
         self.users = list(users or [])
@@ -56,6 +57,8 @@ class FakeClient:
         self.documents = {k: list(v) for k, v in (documents or {}).items()}
         # document_id -> raw bytes
         self.document_blobs = dict(document_blobs or {})
+        # project_id -> list of verified-data rows
+        self.verified_data = {k: list(v) for k, v in (verified_data or {}).items()}
 
         self.created_projects: list[dict] = []
         self.created_versions: list[dict] = []
@@ -64,6 +67,7 @@ class FakeClient:
         self.updated_settings: list[tuple[str, dict]] = []
         self.exported_projects: list[str] = []
         self.uploaded_documents: list[tuple[str, str, bytes]] = []
+        self.created_verified_data: list[dict] = []
         self._next_id = 1
 
     def _mint(self, prefix: str) -> str:
@@ -161,6 +165,20 @@ class FakeClient:
         row = {"id": self._mint("tgt-doc"), "original_filename": file_name}
         self.documents.setdefault(project_id, []).append(row)
         return {"data": [{"document_name": file_name}]}
+
+    # ----- verified data -----
+
+    def list_agentic_verified_data(self, project_id):
+        return list(self.verified_data.get(project_id, []))
+
+    def create_agentic_verified_data(self, payload):
+        new = dict(payload)
+        new["id"] = self._mint("tgt-vd")
+        self.created_verified_data.append(new)
+        self.verified_data.setdefault(payload["project"], []).append(
+            {"document": payload["document"], "data": payload["data"]}
+        )
+        return new
 
 
 def _ctx(source, target, *, remap=None, **opt_overrides):
@@ -573,3 +591,86 @@ def test_dry_run_counts_documents_without_uploading():
     assert tgt.uploaded_documents == []
     # 1 project + 2 documents predicted as creates.
     assert result.created == 3
+
+
+def test_verified_data_cloned_mapped_to_target_doc_by_filename():
+    src = FakeClient(
+        projects=[_src_project("src-p", "Receipts")],
+        documents={"src-p": [{"id": "d1", "original_filename": "report.pdf"}]},
+        document_blobs={"d1": b"%PDF-r"},
+        verified_data={
+            "src-p": [
+                {"document_name": "report.pdf", "document": "d1", "data": {"x": 1}},
+                # Ground truth for a doc that won't exist on target → skipped.
+                {"document_name": "gone.pdf", "document": "d9", "data": {"y": 2}},
+            ]
+        },
+    )
+    tgt = FakeClient()
+    ctx = _ctx(src, tgt)
+
+    result = AgenticStudioPhase(ctx).run(CloneReport())
+
+    assert result.failed == 0
+    assert len(tgt.created_verified_data) == 1
+    row = tgt.created_verified_data[0]
+    # Re-pointed to the freshly uploaded target document, not the source id.
+    uploaded_doc_id = tgt.documents[row["project"]][0]["id"]
+    assert row["document"] == uploaded_doc_id
+    assert row["data"] == {"x": 1}
+    # 'gone.pdf' ground truth skipped (no matching target document).
+    assert any("gone.pdf" in w for w in result.warnings)
+
+
+def test_verified_data_skipped_when_already_on_target():
+    src = FakeClient(
+        projects=[_src_project("src-p", "Receipts")],
+        documents={"src-p": [{"id": "d1", "original_filename": "report.pdf"}]},
+        verified_data={
+            "src-p": [
+                {"document_name": "report.pdf", "document": "d1", "data": {"x": 1}}
+            ]
+        },
+    )
+    tgt = FakeClient()
+    # Adopt an existing target project pre-seeded with the doc + its verified row.
+    tgt.projects.append({"id": "tgt-proj-0001", "name": "Receipts"})
+    tgt.documents["tgt-proj-0001"] = [{"id": "t-d1", "original_filename": "report.pdf"}]
+    tgt.verified_data["tgt-proj-0001"] = [{"document": "t-d1", "data": {"x": 1}}]
+    ctx = _ctx(src, tgt)
+
+    AgenticStudioPhase(ctx).run(CloneReport())
+
+    assert tgt.created_verified_data == []
+
+
+def test_dry_run_counts_verified_data_without_writing():
+    src = FakeClient(
+        projects=[_src_project("src-p", "Receipts")],
+        verified_data={
+            "src-p": [{"document_name": "a.pdf", "document": "d1", "data": {}}]
+        },
+    )
+    tgt = FakeClient()
+    ctx = _ctx(src, tgt, dry_run=True)
+
+    result = AgenticStudioPhase(ctx).run(CloneReport())
+
+    assert tgt.created_verified_data == []
+    # 1 project + 1 verified-data row predicted as creates.
+    assert result.created == 2
+
+
+def test_documents_not_copied_under_file_strategy_skip():
+    src = FakeClient(
+        projects=[_src_project("src-p", "Receipts")],
+        documents={"src-p": [{"id": "d1", "original_filename": "report.pdf"}]},
+        document_blobs={"d1": b"%PDF-r"},
+    )
+    tgt = FakeClient()
+    ctx = _ctx(src, tgt, file_strategy="skip")
+
+    result = AgenticStudioPhase(ctx).run(CloneReport())
+
+    assert tgt.uploaded_documents == []
+    assert result.skipped == 1

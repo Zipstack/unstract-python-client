@@ -22,6 +22,11 @@ Per source project:
      per-run ``agentic_prompt_version`` table and the child's ``parent_version``
      resolves through it. ``project`` is bound to the target id.
    - **schemas**: bound to the target ``project`` and created.
+   - **documents**: source uploads re-uploaded to the target project (skipping
+     filenames already present); they live in their own store, not the Prompt
+     Studio document table.
+   - **verified data**: ground-truth rows re-pointed to the cloned document by
+     filename. Extracted/comparison data is regenerable and not cloned.
 3. **Registry**: if the project has an active schema + prompt, republish its
    registry entry via the ``export`` action (mirror of custom_tool) and
    record an ``agentic_studio_registry`` remap. Projects with no source
@@ -172,6 +177,7 @@ class AgenticStudioPhase(Phase):
         self._clone_prompt_versions(name, src_project_id, tgt_project_id, result, lock)
         self._clone_schemas(name, src_project_id, tgt_project_id, result, lock)
         self._clone_documents(name, src_project_id, tgt_project_id, result, lock)
+        self._clone_verified_data(name, src_project_id, tgt_project_id, result, lock)
         self._republish_registry(name, src_project_id, tgt_project_id, result, lock)
 
     def _build_project_payload(
@@ -445,6 +451,17 @@ class AgenticStudioPhase(Phase):
         if not src_docs:
             return
 
+        # Honour the file strategy: 'skip' means no binary transfer, like the
+        # files and lookups phases. Operator re-uploads on target.
+        if self.ctx.options.file_strategy == "skip":
+            with lock:
+                result.skipped += len(src_docs)
+                result.warnings.append(
+                    f"agentic {name}: {len(src_docs)} document(s) not copied "
+                    "(file_strategy=skip) — upload them manually on target"
+                )
+            return
+
         try:
             tgt_docs = self.ctx.target.list_agentic_documents(tgt_project_id)
         except Exception as e:
@@ -520,6 +537,82 @@ class AgenticStudioPhase(Phase):
         with lock:
             result.created += 1
         logger.info("agentic '%s': uploaded document '%s'", name, file_name)
+
+    # ----- verified (ground-truth) data -----
+
+    def _clone_verified_data(
+        self,
+        name: str,
+        src_project_id: str,
+        tgt_project_id: str,
+        result: PhaseResult,
+        lock: threading.Lock,
+    ) -> None:
+        try:
+            src_rows = self.ctx.source.list_agentic_verified_data(src_project_id)
+        except Exception as e:
+            logger.exception("agentic '%s': verified-data listing failed: %s", name, e)
+            with lock:
+                result.failed += 1
+                result.errors.append(f"agentic {name} list verified-data: {e}")
+            return
+        if not src_rows:
+            return
+
+        # Verified data FKs a document; map source rows to target docs by
+        # filename, the only identity stable across orgs.
+        try:
+            tgt_docs = self.ctx.target.list_agentic_documents(tgt_project_id)
+            tgt_existing = self.ctx.target.list_agentic_verified_data(tgt_project_id)
+        except Exception as e:
+            logger.warning(
+                "agentic '%s': target verified-data lookup failed "
+                "(re-run may duplicate): %s",
+                name,
+                e,
+            )
+            tgt_docs, tgt_existing = [], []
+        doc_id_by_name = {d.get("original_filename"): d.get("id") for d in tgt_docs}
+        verified_doc_ids = {r.get("document") for r in tgt_existing}
+
+        for src in src_rows:
+            file_name = src.get("document_name")
+            tgt_doc_id = doc_id_by_name.get(file_name)
+            if not tgt_doc_id:
+                with lock:
+                    result.skipped += 1
+                    result.warnings.append(
+                        f"agentic {name}: verified data for '{file_name}' skipped — "
+                        "document not on target"
+                    )
+                continue
+            if tgt_doc_id in verified_doc_ids:
+                with lock:
+                    result.skipped += 1
+                continue
+            payload = {
+                "project": tgt_project_id,
+                "document": tgt_doc_id,
+                "data": src.get("data"),
+            }
+            try:
+                self.ctx.target.create_agentic_verified_data(payload)
+            except Exception as e:
+                logger.exception(
+                    "agentic '%s': verified data for '%s' create failed: %s",
+                    name,
+                    file_name,
+                    e,
+                )
+                with lock:
+                    result.failed += 1
+                    result.errors.append(
+                        f"agentic {name} create verified-data {file_name}: {e}"
+                    )
+                continue
+            with lock:
+                result.created += 1
+            logger.info("agentic '%s': cloned verified data for '%s'", name, file_name)
 
     # ----- registry -----
 
@@ -626,12 +719,21 @@ class AgenticStudioPhase(Phase):
             src_docs = self.ctx.source.list_agentic_documents(src_project_id)
         except Exception:
             src_docs = []
+        try:
+            src_verified = self.ctx.source.list_agentic_verified_data(src_project_id)
+        except Exception:
+            src_verified = []
         with lock:
             for v in src_versions:
                 self.ctx.remap.record_planned("agentic_prompt_version", v["id"])
                 result.created += 1
             result.created += len(src_schemas)
-            result.created += len(src_docs)
+            # Documents move only when the file strategy copies binaries.
+            if self.ctx.options.file_strategy == "skip":
+                result.skipped += len(src_docs)
+            else:
+                result.created += len(src_docs)
+            result.created += len(src_verified)
 
     # ----- settings -----
 

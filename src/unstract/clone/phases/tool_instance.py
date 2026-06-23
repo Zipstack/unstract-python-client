@@ -108,12 +108,17 @@ class ToolInstancePhase(Phase):
         src_ti_id = src_ti["id"]
         src_tool_id = src_ti["tool_id"]
 
+        # tool_id is a registry id: Prompt Studio tools register under
+        # prompt_studio_registry, exported agentic projects under
+        # agentic_studio_registry. Resolve against both.
         with lock:
-            tgt_tool_id = self.ctx.remap.resolve("prompt_studio_registry", src_tool_id)
+            tgt_tool_id = self.ctx.remap.resolve(
+                "prompt_studio_registry", src_tool_id
+            ) or self.ctx.remap.resolve("agentic_studio_registry", src_tool_id)
         if not tgt_tool_id:
             logger.warning(
                 "skipping tool_instance %s — no registry remap for tool_id %s "
-                "(custom tool likely unpublished on source)",
+                "(tool likely unpublished on source)",
                 src_ti_id,
                 src_tool_id,
             )

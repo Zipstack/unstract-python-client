@@ -144,6 +144,24 @@ def test_skip_when_registry_remap_missing():
     assert tgt.create_calls == []
 
 
+def test_resolves_tool_id_via_agentic_registry():
+    # An exported agentic project registers under agentic_studio_registry,
+    # not prompt_studio_registry; its tool_instance must still resolve.
+    src = FakeClient()
+    src.instances[SRC_WF] = [_src_ti("src-ti-1", SRC_WF, SRC_REG, {})]
+    tgt = FakeClient()
+    remap = RemapTable()
+    remap.record("workflow", SRC_WF, TGT_WF)
+    remap.record("agentic_studio_registry", SRC_REG, TGT_REG)
+    ctx = _ctx(src, tgt, remap=remap)
+
+    result = ToolInstancePhase(ctx).run(CloneReport())
+
+    assert result.created == 1
+    assert result.skipped == 0
+    assert tgt.create_calls[0]["tool_id"] == TGT_REG
+
+
 def test_adopt_existing_target_instance_and_repatch_metadata():
     src = FakeClient()
     src_meta = {"llm": "My OpenAI"}

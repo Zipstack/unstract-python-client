@@ -674,3 +674,26 @@ def test_documents_not_copied_under_file_strategy_skip():
 
     assert tgt.uploaded_documents == []
     assert result.skipped == 1
+
+
+def test_dry_run_skip_strategy_counts_docs_and_verified_as_skipped():
+    # Verified data FKs a document; under skip no docs land on target, so the
+    # plan must forecast verified as skipped too — not as un-creatable creates.
+    src = FakeClient(
+        projects=[_src_project("src-p", "Receipts")],
+        documents={"src-p": [{"id": "d1", "original_filename": "report.pdf"}]},
+        document_blobs={"d1": b"%PDF-r"},
+        verified_data={
+            "src-p": [{"document_name": "report.pdf", "document": "d1", "data": {}}]
+        },
+    )
+    tgt = FakeClient()
+    ctx = _ctx(src, tgt, dry_run=True, file_strategy="skip")
+
+    result = AgenticStudioPhase(ctx).run(CloneReport())
+
+    assert tgt.uploaded_documents == []
+    assert tgt.created_verified_data == []
+    # Only the project is a forecast create; doc + verified row both skipped.
+    assert result.created == 1
+    assert result.skipped == 2

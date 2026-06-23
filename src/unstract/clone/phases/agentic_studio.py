@@ -729,11 +729,13 @@ class AgenticStudioPhase(Phase):
                 result.created += 1
             result.created += len(src_schemas)
             # Documents move only when the file strategy copies binaries.
+            # Verified data FKs a document, so skipping files strands it too.
             if self.ctx.options.file_strategy == "skip":
                 result.skipped += len(src_docs)
+                result.skipped += len(src_verified)
             else:
                 result.created += len(src_docs)
-            result.created += len(src_verified)
+                result.created += len(src_verified)
 
     # ----- settings -----
 

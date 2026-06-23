@@ -921,3 +921,45 @@ class PlatformClient:
             params["agentic_project"] = agentic_project
         result = self._request("GET", "agentic-studio-registry/", params=params)
         return result if isinstance(result, list) else (result or {}).get("results", [])
+
+    def list_agentic_documents(self, project_id: str) -> list[dict[str, Any]]:
+        """List a project's uploaded documents. Rows carry ``id`` and
+        ``original_filename``. Agentic docs are a store of their own, distinct
+        from Prompt Studio ``prompt-document`` rows.
+        """
+        result = self._request(
+            "GET", "agentic/documents/", params={"project_id": project_id}
+        )
+        return result if isinstance(result, list) else (result or {}).get("results", [])
+
+    def download_agentic_document(self, document_id: str) -> bytes:
+        """Download an agentic document's original bytes.
+
+        The ``file`` route serves the raw binary (not a JSON envelope), so this
+        bypasses the JSON-decoding request path.
+        """
+        url = self._url(f"agentic/documents/{document_id}/file/")
+        logger.debug("GET %s", url)
+        resp = self._session.get(url, timeout=self.timeout, verify=self.verify)
+        if not 200 <= resp.status_code < 300:
+            raise PlatformAPIError(
+                f"GET agentic/documents/{document_id}/file/ "
+                f"returned {resp.status_code}",
+                status_code=resp.status_code,
+                body=resp.text[:2000],
+            )
+        return resp.content
+
+    def upload_agentic_document(
+        self, project_id: str, file_name: str, data: bytes, mime_type: str
+    ) -> dict[str, Any]:
+        """Upload a document into a target agentic project.
+
+        Creates the ``AgenticDocument`` row; extraction/summary stay a UI step,
+        as with Prompt Studio uploads. Callers pre-check filenames to avoid
+        duplicates on re-runs.
+        """
+        files = {"file": (file_name, data, mime_type)}
+        return self._request(
+            "POST", f"agentic/projects/{project_id}/documents/upload/", files=files
+        )

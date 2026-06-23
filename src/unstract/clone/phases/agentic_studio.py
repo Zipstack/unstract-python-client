@@ -35,6 +35,7 @@ per-project config.
 from __future__ import annotations
 
 import logging
+import mimetypes
 import threading
 from typing import Any
 
@@ -170,6 +171,7 @@ class AgenticStudioPhase(Phase):
         self._replicate_share(src, name, tgt_project_id, result, lock)
         self._clone_prompt_versions(name, src_project_id, tgt_project_id, result, lock)
         self._clone_schemas(name, src_project_id, tgt_project_id, result, lock)
+        self._clone_documents(name, src_project_id, tgt_project_id, result, lock)
         self._republish_registry(name, src_project_id, tgt_project_id, result, lock)
 
     def _build_project_payload(
@@ -422,6 +424,103 @@ class AgenticStudioPhase(Phase):
             with lock:
                 result.created += 1
 
+    # ----- documents -----
+
+    def _clone_documents(
+        self,
+        name: str,
+        src_project_id: str,
+        tgt_project_id: str,
+        result: PhaseResult,
+        lock: threading.Lock,
+    ) -> None:
+        try:
+            src_docs = self.ctx.source.list_agentic_documents(src_project_id)
+        except Exception as e:
+            logger.exception("agentic '%s': document listing failed: %s", name, e)
+            with lock:
+                result.failed += 1
+                result.errors.append(f"agentic {name} list documents: {e}")
+            return
+        if not src_docs:
+            return
+
+        try:
+            tgt_docs = self.ctx.target.list_agentic_documents(tgt_project_id)
+        except Exception as e:
+            logger.warning(
+                "agentic '%s': target document listing failed "
+                "(re-run may duplicate): %s",
+                name,
+                e,
+            )
+            tgt_docs = []
+        target_names = {d.get("original_filename") for d in tgt_docs}
+
+        for src in src_docs:
+            file_name = src.get("original_filename")
+            src_doc_id = src.get("id")
+            if not file_name or not src_doc_id:
+                continue
+            if file_name in target_names:
+                with lock:
+                    result.skipped += 1
+                logger.info(
+                    "agentic '%s': document '%s' already on target — skipping",
+                    name,
+                    file_name,
+                )
+                continue
+            self._clone_one_document(
+                name, tgt_project_id, src_doc_id, file_name, result, lock
+            )
+
+    def _clone_one_document(
+        self,
+        name: str,
+        tgt_project_id: str,
+        src_doc_id: str,
+        file_name: str,
+        result: PhaseResult,
+        lock: threading.Lock,
+    ) -> None:
+        try:
+            raw = self.ctx.source.download_agentic_document(src_doc_id)
+        except Exception as e:
+            logger.exception(
+                "agentic '%s': document '%s' download failed: %s", name, file_name, e
+            )
+            with lock:
+                result.failed += 1
+                result.errors.append(f"agentic {name} download {file_name}: {e}")
+            return
+
+        if len(raw) > self.ctx.options.max_file_size:
+            with lock:
+                result.skipped += 1
+                result.warnings.append(
+                    f"agentic {name}: document {file_name} exceeds size cap — "
+                    "upload it manually on target"
+                )
+            return
+
+        mime = mimetypes.guess_type(file_name)[0] or "application/pdf"
+        try:
+            self.ctx.target.upload_agentic_document(
+                tgt_project_id, file_name, raw, mime
+            )
+        except Exception as e:
+            logger.exception(
+                "agentic '%s': document '%s' upload failed: %s", name, file_name, e
+            )
+            with lock:
+                result.failed += 1
+                result.errors.append(f"agentic {name} upload {file_name}: {e}")
+            return
+        with lock:
+            result.created += 1
+        logger.info("agentic '%s': uploaded document '%s'", name, file_name)
+
     # ----- registry -----
 
     def _republish_registry(
@@ -507,8 +606,9 @@ class AgenticStudioPhase(Phase):
         result: PhaseResult,
         lock: threading.Lock,
     ) -> None:
-        """Dry-run: count source prompt versions + schemas as planned and
-        record planned prompt-version ids so downstream resolves don't miss.
+        """Dry-run: count source prompt versions + schemas + documents as
+        planned and record planned prompt-version ids so downstream resolves
+        don't miss.
         """
         try:
             src_versions = self.ctx.source.list_agentic_prompt_versions(
@@ -522,11 +622,16 @@ class AgenticStudioPhase(Phase):
             )
         except Exception:
             src_schemas = []
+        try:
+            src_docs = self.ctx.source.list_agentic_documents(src_project_id)
+        except Exception:
+            src_docs = []
         with lock:
             for v in src_versions:
                 self.ctx.remap.record_planned("agentic_prompt_version", v["id"])
                 result.created += 1
             result.created += len(src_schemas)
+            result.created += len(src_docs)
 
     # ----- settings -----
 

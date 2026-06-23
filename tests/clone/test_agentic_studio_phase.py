@@ -39,6 +39,8 @@ class FakeClient:
         settings=None,
         registries=None,
         users=None,
+        documents=None,
+        document_blobs=None,
     ):
         self.projects = list(projects or [])
         self.users = list(users or [])
@@ -50,6 +52,10 @@ class FakeClient:
         self.settings = list(settings or [])
         # project_id -> list of registry rows
         self.registries = {k: list(v) for k, v in (registries or {}).items()}
+        # project_id -> list of document rows
+        self.documents = {k: list(v) for k, v in (documents or {}).items()}
+        # document_id -> raw bytes
+        self.document_blobs = dict(document_blobs or {})
 
         self.created_projects: list[dict] = []
         self.created_versions: list[dict] = []
@@ -57,6 +63,7 @@ class FakeClient:
         self.created_settings: list[dict] = []
         self.updated_settings: list[tuple[str, dict]] = []
         self.exported_projects: list[str] = []
+        self.uploaded_documents: list[tuple[str, str, bytes]] = []
         self._next_id = 1
 
     def _mint(self, prefix: str) -> str:
@@ -140,6 +147,20 @@ class FakeClient:
 
     def list_agentic_registries(self, *, agentic_project=None):
         return list(self.registries.get(agentic_project, []))
+
+    # ----- documents -----
+
+    def list_agentic_documents(self, project_id):
+        return list(self.documents.get(project_id, []))
+
+    def download_agentic_document(self, document_id):
+        return self.document_blobs.get(document_id, b"%PDF-fake")
+
+    def upload_agentic_document(self, project_id, file_name, data, mime_type):
+        self.uploaded_documents.append((project_id, file_name, data))
+        row = {"id": self._mint("tgt-doc"), "original_filename": file_name}
+        self.documents.setdefault(project_id, []).append(row)
+        return {"data": [{"document_name": file_name}]}
 
 
 def _ctx(source, target, *, remap=None, **opt_overrides):
@@ -507,3 +528,48 @@ def test_source_group_share_replicated_via_remap():
     assert len(tgt.shared_projects) == 1
     _, payload = tgt.shared_projects[0]
     assert payload["shared_groups"] == [70]
+
+
+def test_documents_cloned_skipping_those_already_on_target():
+    src = FakeClient(
+        projects=[_src_project("src-p", "Receipts")],
+        documents={
+            "src-p": [
+                {"id": "d-new", "original_filename": "new.pdf"},
+                {"id": "d-dup", "original_filename": "dup.pdf"},
+            ]
+        },
+        document_blobs={"d-new": b"%PDF-new", "d-dup": b"%PDF-dup"},
+    )
+    tgt = FakeClient()
+    # Adopt an existing target project so the dup doc can be pre-seeded on it.
+    tgt.projects.append({"id": "tgt-proj-0001", "name": "Receipts"})
+    tgt.documents["tgt-proj-0001"] = [{"id": "t-dup", "original_filename": "dup.pdf"}]
+    ctx = _ctx(src, tgt)
+
+    result = AgenticStudioPhase(ctx).run(CloneReport())
+
+    assert result.failed == 0
+    # 'new.pdf' uploaded, 'dup.pdf' skipped (already present).
+    assert tgt.uploaded_documents == [("tgt-proj-0001", "new.pdf", b"%PDF-new")]
+    assert result.skipped == 1
+
+
+def test_dry_run_counts_documents_without_uploading():
+    src = FakeClient(
+        projects=[_src_project("src-p", "Receipts")],
+        documents={
+            "src-p": [
+                {"id": "d1", "original_filename": "a.pdf"},
+                {"id": "d2", "original_filename": "b.pdf"},
+            ]
+        },
+    )
+    tgt = FakeClient()
+    ctx = _ctx(src, tgt, dry_run=True)
+
+    result = AgenticStudioPhase(ctx).run(CloneReport())
+
+    assert tgt.uploaded_documents == []
+    # 1 project + 2 documents predicted as creates.
+    assert result.created == 3

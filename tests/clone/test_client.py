@@ -7,6 +7,7 @@ Coverage:
 - 204 / empty body returns ``None`` instead of raising on .json().
 - ``get_post_schema`` parses DRF ``actions.POST`` and caches per path.
 - ``close()`` shuts the underlying session; context manager works.
+- ``_paginate`` follows ``next`` to exhaustion and refuses to return a short read.
 """
 
 from __future__ import annotations
@@ -157,3 +158,43 @@ def test_get_review_settings_reraises_non_500():
     with pytest.raises(PlatformAPIError) as exc_info:
         client.get_review_settings("wf-1")
     assert exc_info.value.status_code == 403
+
+
+def _client_with_pages(*payloads) -> tuple[PlatformClient, MagicMock]:
+    """Client whose session returns each payload in turn, one per request."""
+    client = PlatformClient(_endpoint())
+    mock_request = MagicMock(
+        side_effect=[_fake_response(200, p) for p in payloads],
+    )
+    client._session.request = mock_request
+    return client, mock_request
+
+
+def test_paginate_follows_next_across_pages():
+    page1 = {
+        "count": 3,
+        "next": "https://api.example.com/next?page=2",
+        "results": [1, 2],
+    }
+    page2 = {"count": 3, "next": None, "results": [3]}
+    client, mock_request = _client_with_pages(page1, page2)
+
+    assert client.list_tags() == [1, 2, 3]
+    # Second hop must GET the absolute ``next`` URL verbatim, not an org path.
+    assert mock_request.call_args.args[1] == "https://api.example.com/next?page=2"
+
+
+def test_paginate_raises_on_short_read():
+    # A page set that doesn't add up means rows were dropped; a clone that
+    # silently copies a subset is worse than one that fails.
+    truncated = {"count": 9, "next": None, "results": [1, 2]}
+    client, _ = _client_with_pages(truncated)
+    with pytest.raises(PlatformAPIError, match="count=9"):
+        client.list_tags()
+
+
+def test_paginate_raises_on_cyclic_next():
+    looping = {"count": 2, "next": "https://api.example.com/loop", "results": [1]}
+    client, _ = _client_with_pages(looping, looping, looping)
+    with pytest.raises(PlatformAPIError, match="looped"):
+        client.list_tags()

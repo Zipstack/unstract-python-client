@@ -1,0 +1,52 @@
+name: Clone Tests
+
+# Focused, fast signal for the clone tooling — runs only the clone suite when
+# clone code, its tests, or the dependency set changes. The full suite in
+# test.yml still runs on every PR; this gates the pagination page-following
+# logic (client._paginate) that silently truncates a migration if it regresses.
+on:
+  pull_request:
+    branches: [main, "feat/**", "fix/**"]
+    paths:
+      - "src/unstract/clone/**"
+      - "tests/clone/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/clone-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/unstract/clone/**"
+      - "tests/clone/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/clone-tests.yml"
+
+jobs:
+  clone-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.6.14"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev --all-extras
+
+      - name: Create test env
+        run: cp tests/sample.env tests/.env
+
+      - name: Clone tests (pytest)
+        run: uv run pytest tests/clone/ -v

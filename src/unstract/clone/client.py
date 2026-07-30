@@ -119,19 +119,40 @@ class PlatformClient:
             return None
         return resp.json()
 
+    @staticmethod
+    def _origin(url: str) -> tuple[str, str, int | None]:
+        """Normalised (scheme, host, port) — case- and default-port-insensitive."""
+        parsed = urlparse(url)
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").lower()
+        port = parsed.port or {"http": 80, "https": 443}.get(scheme)
+        return (scheme, host, port)
+
     def _assert_same_origin(self, url: str, label: str) -> None:
         """Reject a pagination ``next`` link that leaves the platform origin.
 
         DRF builds ``next`` from the request host, but a compromised or
         misconfigured response must not redirect the bearer key elsewhere.
+        Compared on normalised origin so equivalent hosts (case, default port)
+        aren't rejected as off-site.
         """
-        base = urlparse(self.endpoint.base_url)
-        target = urlparse(url)
-        if (target.scheme, target.netloc) != (base.scheme, base.netloc):
+        if self._origin(url) != self._origin(self.endpoint.base_url):
+            scheme, host, _ = self._origin(url)
             raise PlatformAPIError(
                 f"GET {label} pagination 'next' left the platform origin: "
-                f"{target.scheme}://{target.netloc}"
+                f"{scheme}://{host}"
             )
+
+    @staticmethod
+    def _results_or_raise(result: Any, path: str) -> list[Any]:
+        """Return the DRF envelope's ``results`` list or raise on any other shape.
+
+        A non-dict, a missing ``results`` or a ``results`` that isn't a list all
+        fail loudly here rather than corrupting rows via ``extend`` downstream.
+        """
+        if not isinstance(result, dict) or not isinstance(result.get("results"), list):
+            raise PlatformAPIError(f"GET {path} returned an unrecognised list payload")
+        return result["results"]
 
     def _paginate(
         self, path: str, params: dict[str, Any] | None = None
@@ -146,14 +167,12 @@ class PlatformClient:
         result = self._request("GET", path, params=dict(params or {}))
         if isinstance(result, list):
             return result
-        if not isinstance(result, dict) or "results" not in result:
-            raise PlatformAPIError(f"GET {path} returned an unrecognised list payload")
 
         rows: list[dict[str, Any]] = []
-        expected = result.get("count")
+        expected = result.get("count") if isinstance(result, dict) else None
         seen: set[str] = set()
         while True:
-            rows.extend(result.get("results") or [])
+            rows.extend(self._results_or_raise(result, path))
             next_url = result.get("next")
             if not next_url:
                 break
@@ -162,10 +181,6 @@ class PlatformClient:
             seen.add(next_url)
             self._assert_same_origin(next_url, path)
             result = self._send("GET", next_url, path)
-            if not isinstance(result, dict) or "results" not in result:
-                raise PlatformAPIError(
-                    f"GET {path} returned an unrecognised list payload"
-                )
 
         if expected is not None and len(rows) != expected:
             raise PlatformAPIError(

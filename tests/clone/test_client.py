@@ -208,6 +208,28 @@ def test_paginate_rejects_offsite_next():
         client.list_tags()
 
 
+def test_paginate_follows_equivalent_origin_next():
+    # Same origin with uppercase host + explicit default port must be followed,
+    # not rejected as off-site.
+    page1 = {
+        "count": 3,
+        "next": "https://API.EXAMPLE.COM:443/next?page=2",
+        "results": [1, 2],
+    }
+    page2 = {"count": 3, "next": None, "results": [3]}
+    client, _ = _client_with_pages(page1, page2)
+    assert client.list_tags() == [1, 2, 3]
+
+
+def test_paginate_raises_on_nonlist_results():
+    # `results` present but not a list must fail loudly, not corrupt rows via
+    # extend (character-by-character for a string, TypeError for an int).
+    bad = {"count": 1, "next": None, "results": "oops"}
+    client, _ = _client_with_pages(bad)
+    with pytest.raises(PlatformAPIError, match="unrecognised list payload"):
+        client.list_tags()
+
+
 def test_paginate_raises_on_malformed_later_page():
     # A later page that isn't a DRF envelope must fail loudly, not raise an
     # incidental AttributeError on the next loop turn.

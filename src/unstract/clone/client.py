@@ -136,8 +136,16 @@ class PlatformClient:
         Compared on normalised origin so equivalent hosts (case, default port)
         aren't rejected as off-site.
         """
-        if self._origin(url) != self._origin(self.endpoint.base_url):
-            scheme, host, _ = self._origin(url)
+        try:
+            link_origin = self._origin(url)
+        except ValueError as e:
+            # urlparse raises on a non-numeric / out-of-range port only when
+            # ``.port`` is read, so a malformed ``next`` surfaces here.
+            raise PlatformAPIError(
+                f"GET {label} pagination 'next' is a malformed URL: {e}"
+            ) from e
+        if link_origin != self._origin(self.endpoint.base_url):
+            scheme, host, _ = link_origin
             raise PlatformAPIError(
                 f"GET {label} pagination 'next' left the platform origin: "
                 f"{scheme}://{host}"

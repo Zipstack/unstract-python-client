@@ -221,6 +221,19 @@ def test_paginate_follows_equivalent_origin_next():
     assert client.list_tags() == [1, 2, 3]
 
 
+def test_paginate_raises_on_malformed_port_in_next():
+    # A `next` URL with a non-numeric port makes urlparse raise ValueError on
+    # `.port`; it must surface as PlatformAPIError, not an incidental traceback.
+    page1 = {
+        "count": 3,
+        "next": "https://api.example.com:notaport/next",
+        "results": [1, 2],
+    }
+    client, _ = _client_with_pages(page1)
+    with pytest.raises(PlatformAPIError, match="malformed URL"):
+        client.list_tags()
+
+
 def test_paginate_raises_on_nonlist_results():
     # `results` present but not a list must fail loudly, not corrupt rows via
     # extend (character-by-character for a string, TypeError for an int).

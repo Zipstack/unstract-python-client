@@ -13,6 +13,7 @@ from __future__ import annotations
 import json as json_lib
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -118,6 +119,20 @@ class PlatformClient:
             return None
         return resp.json()
 
+    def _assert_same_origin(self, url: str, label: str) -> None:
+        """Reject a pagination ``next`` link that leaves the platform origin.
+
+        DRF builds ``next`` from the request host, but a compromised or
+        misconfigured response must not redirect the bearer key elsewhere.
+        """
+        base = urlparse(self.endpoint.base_url)
+        target = urlparse(url)
+        if (target.scheme, target.netloc) != (base.scheme, base.netloc):
+            raise PlatformAPIError(
+                f"GET {label} pagination 'next' left the platform origin: "
+                f"{target.scheme}://{target.netloc}"
+            )
+
     def _paginate(
         self, path: str, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
@@ -145,7 +160,12 @@ class PlatformClient:
             if next_url in seen:
                 raise PlatformAPIError(f"GET {path} pagination looped at {next_url}")
             seen.add(next_url)
+            self._assert_same_origin(next_url, path)
             result = self._send("GET", next_url, path)
+            if not isinstance(result, dict) or "results" not in result:
+                raise PlatformAPIError(
+                    f"GET {path} returned an unrecognised list payload"
+                )
 
         if expected is not None and len(rows) != expected:
             raise PlatformAPIError(

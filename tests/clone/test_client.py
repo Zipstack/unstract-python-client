@@ -198,3 +198,21 @@ def test_paginate_raises_on_cyclic_next():
     client, _ = _client_with_pages(looping, looping, looping)
     with pytest.raises(PlatformAPIError, match="looped"):
         client.list_tags()
+
+
+def test_paginate_rejects_offsite_next():
+    # A ``next`` pointing at another host must not receive the bearer key.
+    page1 = {"count": 3, "next": "https://evil.example.com/next", "results": [1, 2]}
+    client, _ = _client_with_pages(page1)
+    with pytest.raises(PlatformAPIError, match="left the platform origin"):
+        client.list_tags()
+
+
+def test_paginate_raises_on_malformed_later_page():
+    # A later page that isn't a DRF envelope must fail loudly, not raise an
+    # incidental AttributeError on the next loop turn.
+    page1 = {"count": 3, "next": "https://api.example.com/next", "results": [1, 2]}
+    page2 = [3]  # bare list where an envelope was expected
+    client, _ = _client_with_pages(page1, page2)
+    with pytest.raises(PlatformAPIError, match="unrecognised list payload"):
+        client.list_tags()

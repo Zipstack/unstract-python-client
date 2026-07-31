@@ -204,12 +204,12 @@ def test_paginate_rejects_offsite_next():
     # A ``next`` pointing at another host must not receive the bearer key.
     page1 = {"count": 3, "next": "https://evil.example.com/next", "results": [1, 2]}
     client, _ = _client_with_pages(page1)
-    with pytest.raises(PlatformAPIError, match="left the platform origin"):
+    with pytest.raises(PlatformAPIError, match="left the platform host"):
         client.list_tags()
 
 
 def test_paginate_follows_equivalent_origin_next():
-    # Same origin with uppercase host + explicit default port must be followed,
+    # Same host with uppercase + explicit default port must be followed,
     # not rejected as off-site.
     page1 = {
         "count": 3,
@@ -219,6 +219,30 @@ def test_paginate_follows_equivalent_origin_next():
     page2 = {"count": 3, "next": None, "results": [3]}
     client, _ = _client_with_pages(page1, page2)
     assert client.list_tags() == [1, 2, 3]
+
+
+def test_paginate_follows_next_with_different_scheme_or_port():
+    # A TLS-terminating proxy emits an http:// (and/or off-port) next link for
+    # an https:// client. Same host → must be followed, not rejected.
+    page1 = {
+        "count": 3,
+        "next": "http://api.example.com:8080/next?page=2",
+        "results": [1, 2],
+    }
+    page2 = {"count": 3, "next": None, "results": [3]}
+    client, _ = _client_with_pages(page1, page2)
+    assert client.list_tags() == [1, 2, 3]
+
+
+def test_paginate_empty_body_returns_empty_list():
+    # A 204 / empty first page means "no rows", not a malformed payload — it
+    # must return [] like the pre-pagination ``(result or {}).get`` guard did.
+    client = PlatformClient(_endpoint())
+    empty = MagicMock()
+    empty.status_code = 204
+    empty.content = b""
+    client._session.request = MagicMock(return_value=empty)
+    assert client.list_tags() == []
 
 
 def test_paginate_raises_on_malformed_port_in_next():

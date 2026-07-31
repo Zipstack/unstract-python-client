@@ -128,27 +128,28 @@ class PlatformClient:
         port = parsed.port or {"http": 80, "https": 443}.get(scheme)
         return (scheme, host, port)
 
-    def _assert_same_origin(self, url: str, label: str) -> None:
-        """Reject a pagination ``next`` link that leaves the platform origin.
+    def _assert_same_host(self, url: str, label: str) -> None:
+        """Reject a pagination ``next`` link that points at a different host.
 
         DRF builds ``next`` from the request host, but a compromised or
         misconfigured response must not redirect the bearer key elsewhere.
-        Compared on normalised origin so equivalent hosts (case, default port)
-        aren't rejected as off-site.
+        Only the host is compared: a TLS-terminating proxy legitimately emits
+        ``http://`` next links (or a non-default port) for an ``https://``
+        client, and rejecting those would break paginated lists on a backend
+        misconfiguration the client can neither see nor fix. The host is the
+        security boundary the bearer key is scoped to.
         """
         try:
-            link_origin = self._origin(url)
+            link_host = self._origin(url)[1]
         except ValueError as e:
             # urlparse raises on a non-numeric / out-of-range port only when
             # ``.port`` is read, so a malformed ``next`` surfaces here.
             raise PlatformAPIError(
                 f"GET {label} pagination 'next' is a malformed URL: {e}"
             ) from e
-        if link_origin != self._origin(self.endpoint.base_url):
-            scheme, host, _ = link_origin
+        if link_host != self._origin(self.endpoint.base_url)[1]:
             raise PlatformAPIError(
-                f"GET {label} pagination 'next' left the platform origin: "
-                f"{scheme}://{host}"
+                f"GET {label} pagination 'next' left the platform host: {link_host}"
             )
 
     @staticmethod
@@ -173,6 +174,10 @@ class PlatformClient:
         page is worse than one that fails.
         """
         result = self._request("GET", path, params=dict(params or {}))
+        # A 204 / empty body means "no rows", matching the pre-pagination
+        # ``(result or {}).get("results", [])`` guard the call sites relied on.
+        if result is None:
+            return []
         if isinstance(result, list):
             return result
 
@@ -187,8 +192,12 @@ class PlatformClient:
             if next_url in seen:
                 raise PlatformAPIError(f"GET {path} pagination looped at {next_url}")
             seen.add(next_url)
-            self._assert_same_origin(next_url, path)
+            self._assert_same_host(next_url, path)
             result = self._send("GET", next_url, path)
+            # A ``next`` link that yields an empty body ends pagination; the
+            # count guard below still flags it as a short read.
+            if result is None:
+                break
 
         if expected is not None and len(rows) != expected:
             raise PlatformAPIError(

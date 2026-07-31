@@ -147,7 +147,14 @@ class PlatformClient:
                 f"GET {label} pagination 'next' left the platform host: {link_host}"
             )
         return urlunparse(
-            (base.scheme, base.netloc, link.path, link.params, link.query, link.fragment)
+            (
+                base.scheme,
+                base.netloc,
+                link.path,
+                link.params,
+                link.query,
+                link.fragment,
+            )
         )
 
     @staticmethod

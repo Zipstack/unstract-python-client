@@ -221,17 +221,31 @@ def test_paginate_follows_equivalent_origin_next():
     assert client.list_tags() == [1, 2, 3]
 
 
-def test_paginate_follows_next_with_different_scheme_or_port():
+def test_paginate_pins_next_to_configured_origin():
     # A TLS-terminating proxy emits an http:// (and/or off-port) next link for
-    # an https:// client. Same host → must be followed, not rejected.
+    # an https:// client. Same host → followed, but the request is pinned back
+    # to the configured https origin so the bearer never goes over plaintext or
+    # an unrelated port. Only the path + query are taken from the server.
     page1 = {
         "count": 3,
         "next": "http://api.example.com:8080/next?page=2",
         "results": [1, 2],
     }
     page2 = {"count": 3, "next": None, "results": [3]}
-    client, _ = _client_with_pages(page1, page2)
+    client, mock_request = _client_with_pages(page1, page2)
     assert client.list_tags() == [1, 2, 3]
+    # Second hop must go to the configured https origin, not the http:8080 the
+    # server returned.
+    assert mock_request.call_args.args[1] == "https://api.example.com/next?page=2"
+
+
+def test_paginate_raises_on_non_string_next():
+    # A truthy non-string `next` must fail loudly, not blow up in seen.add /
+    # urlparse with an incidental TypeError.
+    page1 = {"count": 3, "next": 12345, "results": [1, 2]}
+    client, _ = _client_with_pages(page1)
+    with pytest.raises(PlatformAPIError, match="not a URL string"):
+        client.list_tags()
 
 
 def test_paginate_empty_body_returns_empty_list():

@@ -13,7 +13,7 @@ from __future__ import annotations
 import json as json_lib
 import logging
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import requests
 
@@ -119,38 +119,36 @@ class PlatformClient:
             return None
         return resp.json()
 
-    @staticmethod
-    def _origin(url: str) -> tuple[str, str, int | None]:
-        """Normalised (scheme, host, port) — case- and default-port-insensitive."""
-        parsed = urlparse(url)
-        scheme = parsed.scheme.lower()
-        host = (parsed.hostname or "").lower()
-        port = parsed.port or {"http": 80, "https": 443}.get(scheme)
-        return (scheme, host, port)
+    def _same_origin_url(self, url: str, label: str) -> str:
+        """Pin a pagination ``next`` link to the configured platform origin.
 
-    def _assert_same_host(self, url: str, label: str) -> None:
-        """Reject a pagination ``next`` link that points at a different host.
-
-        DRF builds ``next`` from the request host, but a compromised or
-        misconfigured response must not redirect the bearer key elsewhere.
-        Only the host is compared: a TLS-terminating proxy legitimately emits
-        ``http://`` next links (or a non-default port) for an ``https://``
-        client, and rejecting those would break paginated lists on a backend
-        misconfiguration the client can neither see nor fix. The host is the
-        security boundary the bearer key is scoped to.
+        The bearer key must never be sent over a scheme/port the server picked:
+        a TLS-terminating proxy without ``SECURE_PROXY_SSL_HEADER`` emits
+        ``http://`` (or off-port) ``next`` links for an ``https://`` client, and
+        following those verbatim would put the credential on the wire in
+        plaintext or at an unrelated service. So only the host is trusted for
+        equality (a differing host is a compromised/misconfigured response and
+        is rejected outright), and the scheme, host and port of the followed
+        request are always taken from the configured ``base_url`` — keeping only
+        the server's path and query. The key therefore only ever reaches the
+        origin the client was configured with.
         """
         try:
-            link_host = self._origin(url)[1]
+            link = urlparse(url)
+            link_host = (link.hostname or "").lower()
+            link.port  # noqa: B018 -- forces the ValueError on a malformed port
         except ValueError as e:
-            # urlparse raises on a non-numeric / out-of-range port only when
-            # ``.port`` is read, so a malformed ``next`` surfaces here.
             raise PlatformAPIError(
                 f"GET {label} pagination 'next' is a malformed URL: {e}"
             ) from e
-        if link_host != self._origin(self.endpoint.base_url)[1]:
+        base = urlparse(self.endpoint.base_url)
+        if link_host != (base.hostname or "").lower():
             raise PlatformAPIError(
                 f"GET {label} pagination 'next' left the platform host: {link_host}"
             )
+        return urlunparse(
+            (base.scheme, base.netloc, link.path, link.params, link.query, link.fragment)
+        )
 
     @staticmethod
     def _results_or_raise(result: Any, path: str) -> list[Any]:
@@ -196,8 +194,7 @@ class PlatformClient:
             if next_url in seen:
                 raise PlatformAPIError(f"GET {path} pagination looped at {next_url}")
             seen.add(next_url)
-            self._assert_same_host(next_url, path)
-            result = self._send("GET", next_url, path)
+            result = self._send("GET", self._same_origin_url(next_url, path), path)
             # A ``next`` link that yields an empty body ends pagination; the
             # count guard below still flags it as a short read.
             if result is None:

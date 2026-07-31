@@ -13,6 +13,7 @@ from __future__ import annotations
 import json as json_lib
 import logging
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 import requests
 
@@ -70,7 +71,32 @@ class PlatformClient:
         files: dict[str, Any] | None = None,
         data: dict[str, Any] | None = None,
     ) -> Any:
-        url = self._url(path)
+        return self._send(
+            method,
+            self._url(path),
+            path,
+            params=params,
+            json=json,
+            files=files,
+            data=data,
+        )
+
+    def _send(
+        self,
+        method: str,
+        url: str,
+        label: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: Any = None,
+        files: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> Any:
+        """Issue a request against an already-built URL.
+
+        Split out from ``_request`` so pagination can follow the absolute
+        ``next`` links DRF returns, which are not org-path-relative.
+        """
         # Redact secrets from logs: only entity path + method, never body.
         logger.debug("%s %s", method, url)
         resp = self._session.request(
@@ -85,13 +111,107 @@ class PlatformClient:
         )
         if not 200 <= resp.status_code < 300:
             raise PlatformAPIError(
-                f"{method} {path} returned {resp.status_code}",
+                f"{method} {label} returned {resp.status_code}",
                 status_code=resp.status_code,
                 body=resp.text[:2000],
             )
         if resp.status_code == 204 or not resp.content:
             return None
         return resp.json()
+
+    def _same_origin_url(self, url: str, label: str) -> str:
+        """Pin a pagination ``next`` link to the configured platform origin.
+
+        The bearer key must never be sent over a scheme/port the server picked:
+        a TLS-terminating proxy without ``SECURE_PROXY_SSL_HEADER`` emits
+        ``http://`` (or off-port) ``next`` links for an ``https://`` client, and
+        following those verbatim would put the credential on the wire in
+        plaintext or at an unrelated service. So only the host is trusted for
+        equality (a differing host is a compromised/misconfigured response and
+        is rejected outright), and the scheme, host and port of the followed
+        request are always taken from the configured ``base_url`` — keeping only
+        the server's path and query. The key therefore only ever reaches the
+        origin the client was configured with.
+        """
+        try:
+            link = urlparse(url)
+            link_host = (link.hostname or "").lower()
+            link.port  # noqa: B018 -- forces the ValueError on a malformed port
+        except ValueError as e:
+            raise PlatformAPIError(
+                f"GET {label} pagination 'next' is a malformed URL: {e}"
+            ) from e
+        base = urlparse(self.endpoint.base_url)
+        if link_host != (base.hostname or "").lower():
+            raise PlatformAPIError(
+                f"GET {label} pagination 'next' left the platform host: {link_host}"
+            )
+        return urlunparse(
+            (
+                base.scheme,
+                base.netloc,
+                link.path,
+                link.params,
+                link.query,
+                link.fragment,
+            )
+        )
+
+    @staticmethod
+    def _results_or_raise(result: Any, path: str) -> list[Any]:
+        """Return the DRF envelope's ``results`` list or raise on any other shape.
+
+        A non-dict, a missing ``results`` or a ``results`` that isn't a list all
+        fail loudly here rather than corrupting rows via ``extend`` downstream.
+        """
+        if not isinstance(result, dict) or not isinstance(result.get("results"), list):
+            raise PlatformAPIError(f"GET {path} returned an unrecognised list payload")
+        return result["results"]
+
+    def _paginate(
+        self, path: str, params: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """GET a list endpoint, following DRF pagination to exhaustion.
+
+        A bare list is returned unchanged, so the same client works against
+        deployments where the endpoint is not paginated. A short read is
+        raised rather than returned: a clone that silently copies the first
+        page is worse than one that fails.
+        """
+        result = self._request("GET", path, params=dict(params or {}))
+        # A 204 / empty body means "no rows", matching the pre-pagination
+        # ``(result or {}).get("results", [])`` guard the call sites relied on.
+        if result is None:
+            return []
+        if isinstance(result, list):
+            return result
+
+        rows: list[dict[str, Any]] = []
+        expected = result.get("count") if isinstance(result, dict) else None
+        seen: set[str] = set()
+        while True:
+            rows.extend(self._results_or_raise(result, path))
+            next_url = result.get("next")
+            if not next_url:
+                break
+            if not isinstance(next_url, str):
+                raise PlatformAPIError(
+                    f"GET {path} pagination 'next' is not a URL string"
+                )
+            if next_url in seen:
+                raise PlatformAPIError(f"GET {path} pagination looped at {next_url}")
+            seen.add(next_url)
+            result = self._send("GET", self._same_origin_url(next_url, path), path)
+            # A ``next`` link that yields an empty body ends pagination; the
+            # count guard below still flags it as a short read.
+            if result is None:
+                break
+
+        if expected is not None and len(rows) != expected:
+            raise PlatformAPIError(
+                f"GET {path} returned {len(rows)} rows but reported count={expected}"
+            )
+        return rows
 
     def get_post_schema(self, entity_path: str) -> frozenset[str]:
         """Return the set of fields the backend's POST accepts.
@@ -137,8 +257,7 @@ class PlatformClient:
 
     def list_groups(self) -> list[dict[str, Any]]:
         """List org groups; no server-side name filter — callers match in memory."""
-        result = self._request("GET", "groups/")
-        return result if isinstance(result, list) else (result or {}).get("results", [])
+        return self._paginate("groups/")
 
     def create_group(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Create a group; response has no ``id`` — re-list to learn the pk."""
@@ -146,8 +265,7 @@ class PlatformClient:
 
     def list_group_members(self, group_id: Any) -> list[dict[str, Any]]:
         """List a group's member rows (each carries ``email``)."""
-        result = self._request("GET", f"groups/{group_id}/members/")
-        return result if isinstance(result, list) else result.get("results", [])
+        return self._paginate(f"groups/{group_id}/members/")
 
     def add_group_members(self, group_id: Any, user_ids: list[int]) -> Any:
         """Bulk-add members by user pk; idempotent server-side."""
@@ -175,9 +293,7 @@ class PlatformClient:
             params["adapter_name"] = name
         if adapter_type is not None:
             params["adapter_type"] = adapter_type
-        result = self._request("GET", "adapter/", params=params)
-        # DRF ModelViewSet.list returns a bare list (no pagination on this endpoint).
-        return result if isinstance(result, list) else result.get("results", [])
+        return self._paginate("adapter/", params)
 
     def get_adapter(self, adapter_pk: str) -> dict[str, Any]:
         return self._request("GET", f"adapter/{adapter_pk}/")
@@ -199,8 +315,7 @@ class PlatformClient:
             params["connector_name"] = name
         if connector_type is not None:
             params["connector_type"] = connector_type
-        result = self._request("GET", "connector/", params=params)
-        return result if isinstance(result, list) else result.get("results", [])
+        return self._paginate("connector/", params)
 
     def get_connector(self, connector_pk: str) -> dict[str, Any]:
         return self._request("GET", f"connector/{connector_pk}/")
@@ -215,9 +330,7 @@ class PlatformClient:
         params: dict[str, Any] = {}
         if name is not None:
             params["name"] = name
-        result = self._request("GET", "tags/", params=params)
-        # Tags endpoint uses pagination — accept either bare list or paginated envelope.
-        return result if isinstance(result, list) else result.get("results", [])
+        return self._paginate("tags/", params)
 
     def create_tag(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", "tags/", json=payload)
@@ -226,8 +339,7 @@ class PlatformClient:
 
     def list_custom_tools(self) -> list[dict[str, Any]]:
         """List all prompt-studio projects in this org. No name filter."""
-        result = self._request("GET", "prompt-studio/")
-        return result if isinstance(result, list) else result.get("results", [])
+        return self._paginate("prompt-studio/")
 
     def get_custom_tool(self, tool_id: str) -> dict[str, Any]:
         """Fetch a single prompt-studio project.
@@ -249,8 +361,7 @@ class PlatformClient:
         default profile's adapter UUIDs so they can be remapped to
         target adapter ids for ``import_project``.
         """
-        result = self._request("GET", f"prompt-studio/prompt-studio-profile/{tool_id}/")
-        return result if isinstance(result, list) else result.get("results", [])
+        return self._paginate(f"prompt-studio/prompt-studio-profile/{tool_id}/")
 
     def list_prompts(self, tool_id: str) -> list[dict[str, Any]]:
         """List a tool's prompts (``prompt_id`` + ``prompt_key`` per row).
@@ -259,10 +370,7 @@ class PlatformClient:
         ``import_project`` / ``sync_prompts`` (matched by ``prompt_key``),
         so prompt-scoped cloud config can remap its FKs.
         """
-        result = self._request(
-            "GET", "prompt-studio/prompt/", params={"tool_id": tool_id}
-        )
-        return result if isinstance(result, list) else result.get("results", [])
+        return self._paginate("prompt-studio/prompt/", {"tool_id": tool_id})
 
     def export_project(self, tool_id: str) -> dict[str, Any]:
         """Export a prompt-studio project as a portable JSON blob.
@@ -338,10 +446,7 @@ class PlatformClient:
         enumeration. Response items carry ``document_id``,
         ``document_name``, and ``tool``.
         """
-        result = self._request(
-            "GET", "prompt-studio/prompt-document/", params={"tool_id": tool_id}
-        )
-        return result if isinstance(result, list) else result.get("results", [])
+        return self._paginate("prompt-studio/prompt-document/", {"tool_id": tool_id})
 
     def download_prompt_file(self, tool_id: str, document_id: str) -> dict[str, Any]:
         """GET a Prompt Studio document by tool + document id.
@@ -398,8 +503,7 @@ class PlatformClient:
         params: dict[str, Any] = {}
         if name is not None:
             params["workflow_name"] = name
-        result = self._request("GET", "workflow/", params=params)
-        return result if isinstance(result, list) else result.get("results", [])
+        return self._paginate("workflow/", params)
 
     def get_workflow(self, workflow_id: str) -> dict[str, Any]:
         return self._request("GET", f"workflow/{workflow_id}/")
@@ -420,8 +524,7 @@ class PlatformClient:
         params: dict[str, Any] = {}
         if custom_tool is not None:
             params["custom_tool"] = custom_tool
-        result = self._request("GET", "prompt-studio/registry/", params=params)
-        return result if isinstance(result, list) else result.get("results", [])
+        return self._paginate("prompt-studio/registry/", params)
 
     # ----- tool instances -----
 
@@ -432,8 +535,7 @@ class PlatformClient:
         params: dict[str, Any] = {}
         if workflow_id is not None:
             params["workflow"] = workflow_id
-        result = self._request("GET", "tool_instance/", params=params)
-        return result if isinstance(result, list) else result.get("results", [])
+        return self._paginate("tool_instance/", params)
 
     def create_tool_instance(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Create a tool instance (max 1 per workflow). The created row comes
@@ -466,8 +568,7 @@ class PlatformClient:
         params: dict[str, Any] = {}
         if workflow_id is not None:
             params["workflow"] = workflow_id
-        result = self._request("GET", "workflow/endpoint/", params=params)
-        return result if isinstance(result, list) else result.get("results", [])
+        return self._paginate("workflow/endpoint/", params)
 
     def update_workflow_endpoint(
         self, endpoint_id: str, payload: dict[str, Any]
@@ -490,8 +591,7 @@ class PlatformClient:
             params["pipeline_name"] = name
         if pipeline_type is not None:
             params["type"] = pipeline_type
-        result = self._request("GET", "pipeline/", params=params)
-        return result if isinstance(result, list) else result.get("results", [])
+        return self._paginate("pipeline/", params)
 
     def get_pipeline(self, pipeline_id: str) -> dict[str, Any]:
         return self._request("GET", f"pipeline/{pipeline_id}/")
@@ -518,8 +618,7 @@ class PlatformClient:
         params: dict[str, Any] = {}
         if api_name is not None:
             params["api_name"] = api_name
-        result = self._request("GET", "api/deployment/", params=params)
-        return result if isinstance(result, list) else result.get("results", [])
+        return self._paginate("api/deployment/", params)
 
     def get_api_deployment(self, deployment_id: str) -> dict[str, Any]:
         return self._request("GET", f"api/deployment/{deployment_id}/")
@@ -539,13 +638,11 @@ class PlatformClient:
 
     def list_pipeline_keys(self, pipeline_id: str) -> list[dict[str, Any]]:
         """List API keys belonging to a pipeline."""
-        result = self._request("GET", f"api/keys/pipeline/{pipeline_id}/")
-        return result if isinstance(result, list) else result.get("results", [])
+        return self._paginate(f"api/keys/pipeline/{pipeline_id}/")
 
     def list_api_deployment_keys(self, deployment_id: str) -> list[dict[str, Any]]:
         """List API keys belonging to an API deployment."""
-        result = self._request("GET", f"api/keys/api/{deployment_id}/")
-        return result if isinstance(result, list) else result.get("results", [])
+        return self._paginate(f"api/keys/api/{deployment_id}/")
 
     def create_api_key(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Create an extra API key tied to a pipeline or deployment.
@@ -560,8 +657,7 @@ class PlatformClient:
 
     def list_lookup_definitions(self) -> list[dict[str, Any]]:
         """List lookup definitions in this org. Also the capability-probe path."""
-        result = self._request("GET", "lookups/definitions/")
-        return result if isinstance(result, list) else (result or {}).get("results", [])
+        return self._paginate("lookups/definitions/")
 
     def get_lookup_definition(self, lookup_id: str) -> dict[str, Any]:
         """Fetch a lookup definition's detail.
@@ -607,8 +703,7 @@ class PlatformClient:
         """List a lookup's draft reference files (rows carry ``file_id``,
         ``file_name``, ``file_size``).
         """
-        result = self._request("GET", f"lookups/definitions/{lookup_id}/files/")
-        return result if isinstance(result, list) else (result or {}).get("results", [])
+        return self._paginate(f"lookups/definitions/{lookup_id}/files/")
 
     def download_lookup_file(self, lookup_id: str, file_id: str) -> bytes:
         """Download a reference file's original bytes.
@@ -648,8 +743,7 @@ class PlatformClient:
         ``version`` (source lookup-version uuid), ``lookup_definition``
         (source lookup_id), ``is_draft_version``, and ``variable_mappings``.
         """
-        result = self._request("GET", "lookups/assignments/")
-        return result if isinstance(result, list) else (result or {}).get("results", [])
+        return self._paginate("lookups/assignments/")
 
     def create_lookup_assignment(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Create a prompt-lookup assignment.
@@ -668,9 +762,7 @@ class PlatformClient:
         ``payload`` carries ``shared_to_org`` + ``shared_users`` (target user
         pks). Lookups expose no group-sharing axis, so no ``shared_groups``.
         """
-        return self._request(
-            "PATCH", f"lookups/definitions/{lookup_id}/", json=payload
-        )
+        return self._request("PATCH", f"lookups/definitions/{lookup_id}/", json=payload)
 
     def list_lookup_versions(self, lookup_id: str) -> list[dict[str, Any]]:
         """List a lookup's versions (draft + published).
@@ -678,17 +770,13 @@ class PlatformClient:
         Rows carry ``version_id``, ``is_draft``, ``version_number``,
         ``version_name``; the detail (``get_lookup_version``) inlines content.
         """
-        result = self._request(
-            "GET", f"lookups/definitions/{lookup_id}/versions/"
-        )
+        result = self._request("GET", f"lookups/definitions/{lookup_id}/versions/")
         if isinstance(result, list):
             return result
         # This endpoint wraps rows as {"versions": [...], "next_version_number"}.
         return (result or {}).get("versions", (result or {}).get("results", []))
 
-    def get_lookup_version(
-        self, lookup_id: str, version_id: str
-    ) -> dict[str, Any]:
+    def get_lookup_version(self, lookup_id: str, version_id: str) -> dict[str, Any]:
         """Fetch a version's detail (``prompt_template``, adapters, files)."""
         return self._request(
             "GET", f"lookups/definitions/{lookup_id}/versions/{version_id}/"
@@ -796,12 +884,9 @@ class PlatformClient:
         Returns 200 bare with no query params, so it doubles as the
         manual-review capability probe path.
         """
-        result = self._request("GET", "manual_review/auto_approval_settings/")
-        return result if isinstance(result, list) else (result or {}).get("results", [])
+        return self._paginate("manual_review/auto_approval_settings/")
 
-    def create_auto_approval_settings(
-        self, payload: dict[str, Any]
-    ) -> dict[str, Any]:
+    def create_auto_approval_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Create org-level auto-approval settings.
 
         Writable: ``auto_approved_document_classes``, ``auto_approved_users``.
@@ -813,8 +898,7 @@ class PlatformClient:
 
     def list_review_api_keys(self) -> list[dict[str, Any]]:
         """List review API keys in this org."""
-        result = self._request("GET", "manual_review/api/keys/")
-        return result if isinstance(result, list) else (result or {}).get("results", [])
+        return self._paginate("manual_review/api/keys/")
 
     def create_review_api_key(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Create a review API key. The ``api_key`` secret is server-minted
@@ -833,8 +917,7 @@ class PlatformClient:
         ``lightweight_llm_connector_id`` / ``text_extractor_connector_id``),
         and ``canary_fields``.
         """
-        result = self._request("GET", "agentic/projects/")
-        return result if isinstance(result, list) else (result or {}).get("results", [])
+        return self._paginate("agentic/projects/")
 
     def create_agentic_project(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Create an agentic project. Returns the created row (carries ``id``)."""
@@ -851,8 +934,7 @@ class PlatformClient:
         params: dict[str, Any] = {}
         if project_id is not None:
             params["project_id"] = project_id
-        result = self._request("GET", "agentic/prompt-versions/", params=params)
-        return result if isinstance(result, list) else (result or {}).get("results", [])
+        return self._paginate("agentic/prompt-versions/", params)
 
     def create_agentic_prompt_version(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Create an agentic prompt version (flat endpoint, ``project`` in body)."""
@@ -869,8 +951,7 @@ class PlatformClient:
         params: dict[str, Any] = {}
         if project_id is not None:
             params["project_id"] = project_id
-        result = self._request("GET", "agentic/schemas/", params=params)
-        return result if isinstance(result, list) else (result or {}).get("results", [])
+        return self._paginate("agentic/schemas/", params)
 
     def create_agentic_schema(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Create an agentic schema (flat endpoint, ``project`` in body)."""
@@ -878,8 +959,7 @@ class PlatformClient:
 
     def list_agentic_settings(self) -> list[dict[str, Any]]:
         """List agentic settings. Org-wide key/value rows (no project FK)."""
-        result = self._request("GET", "agentic/settings/")
-        return result if isinstance(result, list) else (result or {}).get("results", [])
+        return self._paginate("agentic/settings/")
 
     def create_agentic_setting(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Create an org-wide agentic setting."""
@@ -919,18 +999,14 @@ class PlatformClient:
         params: dict[str, Any] = {}
         if agentic_project is not None:
             params["agentic_project"] = agentic_project
-        result = self._request("GET", "agentic-studio-registry/", params=params)
-        return result if isinstance(result, list) else (result or {}).get("results", [])
+        return self._paginate("agentic-studio-registry/", params)
 
     def list_agentic_documents(self, project_id: str) -> list[dict[str, Any]]:
         """List a project's uploaded documents. Rows carry ``id`` and
         ``original_filename``. Agentic docs are a store of their own, distinct
         from Prompt Studio ``prompt-document`` rows.
         """
-        result = self._request(
-            "GET", "agentic/documents/", params={"project_id": project_id}
-        )
-        return result if isinstance(result, list) else (result or {}).get("results", [])
+        return self._paginate("agentic/documents/", {"project_id": project_id})
 
     def download_agentic_document(self, document_id: str) -> bytes:
         """Download an agentic document's original bytes.
@@ -968,10 +1044,7 @@ class PlatformClient:
         """List a project's verified (ground-truth) data rows. Each carries
         ``document_name``, ``document``, and ``data`` (the curated JSON).
         """
-        result = self._request(
-            "GET", "agentic/verified-data/", params={"project_id": project_id}
-        )
-        return result if isinstance(result, list) else (result or {}).get("results", [])
+        return self._paginate("agentic/verified-data/", {"project_id": project_id})
 
     def create_agentic_verified_data(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Create a verified-data row (``project``, ``document``, ``data``).

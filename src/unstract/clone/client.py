@@ -189,6 +189,10 @@ class PlatformClient:
             next_url = result.get("next")
             if not next_url:
                 break
+            if not isinstance(next_url, str):
+                raise PlatformAPIError(
+                    f"GET {path} pagination 'next' is not a URL string"
+                )
             if next_url in seen:
                 raise PlatformAPIError(f"GET {path} pagination looped at {next_url}")
             seen.add(next_url)

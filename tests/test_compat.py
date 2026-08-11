@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 import requests
-from requests.exceptions import ConnectionError, Timeout
+from requests.exceptions import ConnectionError, ConnectTimeout, Timeout
 
 from unstract.api_deployments.client import (
     _EXECUTE_SEND_ONLY,
@@ -103,7 +103,7 @@ def _requests_response(status_code=200, json_data=None, text=None):
 @pytest.mark.parametrize(
     ("raised", "expected"),
     [
-        (httpx.ConnectTimeout("connect timed out"), Timeout),
+        (httpx.ConnectTimeout("connect timed out"), ConnectTimeout),
         (httpx.ReadTimeout("read timed out"), Timeout),
         (httpx.WriteTimeout("write timed out"), Timeout),
         (httpx.PoolTimeout("pool timed out"), Timeout),
@@ -117,15 +117,33 @@ def _requests_response(status_code=200, json_data=None, text=None):
 def test_transport_errors_are_translated(raised, expected):
     """Callers catch the ``requests`` classes; httpx's are not subclasses.
 
-    ``ConnectTimeout`` is the case that makes ordering load-bearing: it is a
-    timeout, not a ``ConnectError``, and matching on connection first would
-    mislabel it.
+    ``ConnectTimeout`` is the case that makes ordering load-bearing, and it is
+    also both a ``ConnectionError`` and a ``Timeout`` — the plain ``Timeout``
+    that httpx's hierarchy implies would stop matching half the callers.
     """
     client = _client()
     with patch.object(
         client._transport.get_httpx_client(), "request", side_effect=raised
     ):
         with pytest.raises(expected):
+            client._send("get", "/anything")
+
+
+def test_a_connect_timeout_is_still_a_connection_error():
+    client = _client()
+    with patch.object(
+        client._transport.get_httpx_client(),
+        "request",
+        side_effect=httpx.ConnectTimeout("connect timed out"),
+    ):
+        with pytest.raises(ConnectionError):
+            client._send("get", "/anything")
+    with patch.object(
+        client._transport.get_httpx_client(),
+        "request",
+        side_effect=httpx.ConnectTimeout("connect timed out"),
+    ):
+        with pytest.raises(Timeout):
             client._send("get", "/anything")
 
 

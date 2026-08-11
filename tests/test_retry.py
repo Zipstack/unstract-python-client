@@ -212,7 +212,7 @@ class TestWaitStrategy:
 
 
 class TestRequestWithRetrySuccess:
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_success_on_first_try(self, mock_request, client):
         mock_request.return_value = _mock_response(200)
         resp = client._request_with_retry("GET", "https://api.example.com/test")
@@ -220,7 +220,7 @@ class TestRequestWithRetrySuccess:
         assert mock_request.call_count == 1
 
     @patch("unstract.api_deployments.client.time.sleep")
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_retry_on_503_then_success(self, mock_request, mock_sleep, client):
         mock_request.side_effect = [
             _mock_response(503),
@@ -232,7 +232,7 @@ class TestRequestWithRetrySuccess:
         assert mock_sleep.call_count == 1
 
     @patch("unstract.api_deployments.client.time.sleep")
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_retry_on_500_then_success(self, mock_request, mock_sleep, client):
         mock_request.side_effect = [
             _mock_response(500),
@@ -245,7 +245,7 @@ class TestRequestWithRetrySuccess:
         assert mock_sleep.call_count == 2
 
     @patch("unstract.api_deployments.client.time.sleep")
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_retry_on_429_then_success(self, mock_request, mock_sleep, client):
         mock_request.side_effect = [
             _mock_response(429),
@@ -256,7 +256,7 @@ class TestRequestWithRetrySuccess:
         assert mock_request.call_count == 2
 
     @patch("unstract.api_deployments.client.time.sleep")
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_retry_on_502_then_success(self, mock_request, mock_sleep, client):
         mock_request.side_effect = [
             _mock_response(502),
@@ -267,7 +267,7 @@ class TestRequestWithRetrySuccess:
         assert mock_request.call_count == 2
 
     @patch("unstract.api_deployments.client.time.sleep")
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_retry_on_504_then_success(self, mock_request, mock_sleep, client):
         mock_request.side_effect = [
             _mock_response(504),
@@ -283,7 +283,7 @@ class TestRequestWithRetrySuccess:
 
 class TestRequestWithRetryConnectionErrors:
     @patch("unstract.api_deployments.client.time.sleep")
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_retry_on_connection_error_then_success(
         self, mock_request, mock_sleep, client
     ):
@@ -296,7 +296,7 @@ class TestRequestWithRetryConnectionErrors:
         assert mock_request.call_count == 2
 
     @patch("unstract.api_deployments.client.time.sleep")
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_retry_on_timeout_then_success(self, mock_request, mock_sleep, client):
         mock_request.side_effect = [
             Timeout("Request timed out"),
@@ -307,7 +307,7 @@ class TestRequestWithRetryConnectionErrors:
         assert mock_request.call_count == 2
 
     @patch("unstract.api_deployments.client.time.sleep")
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_connection_error_exhausted_raises(self, mock_request, mock_sleep, client):
         mock_request.side_effect = ConnectionError("Connection refused")
         with pytest.raises(ConnectionError):
@@ -315,7 +315,7 @@ class TestRequestWithRetryConnectionErrors:
         assert mock_request.call_count == client.max_retries + 1
 
     @patch("unstract.api_deployments.client.time.sleep")
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_timeout_exhausted_raises(self, mock_request, mock_sleep, client):
         mock_request.side_effect = Timeout("Request timed out")
         with pytest.raises(Timeout):
@@ -328,7 +328,7 @@ class TestRequestWithRetryConnectionErrors:
 
 class TestRequestWithRetryExhaustion:
     @patch("unstract.api_deployments.client.time.sleep")
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_all_retries_exhausted_returns_last_response(
         self, mock_request, mock_sleep, client
     ):
@@ -342,35 +342,35 @@ class TestRequestWithRetryExhaustion:
 
 
 class TestNoRetryOnNonRetryable:
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_no_retry_on_200(self, mock_request, client):
         mock_request.return_value = _mock_response(200)
         resp = client._request_with_retry("GET", "https://api.example.com/test")
         assert resp.status_code == 200
         assert mock_request.call_count == 1
 
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_no_retry_on_400(self, mock_request, client):
         mock_request.return_value = _mock_response(400)
         resp = client._request_with_retry("GET", "https://api.example.com/test")
         assert resp.status_code == 400
         assert mock_request.call_count == 1
 
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_no_retry_on_401(self, mock_request, client):
         mock_request.return_value = _mock_response(401)
         resp = client._request_with_retry("GET", "https://api.example.com/test")
         assert resp.status_code == 401
         assert mock_request.call_count == 1
 
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_no_retry_on_404(self, mock_request, client):
         mock_request.return_value = _mock_response(404)
         resp = client._request_with_retry("GET", "https://api.example.com/test")
         assert resp.status_code == 404
         assert mock_request.call_count == 1
 
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_no_retry_on_422(self, mock_request, client):
         mock_request.return_value = _mock_response(422)
         resp = client._request_with_retry("GET", "https://api.example.com/test")
@@ -382,7 +382,7 @@ class TestNoRetryOnNonRetryable:
 
 
 class TestTimeoutPassed:
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_no_default_timeout_set(self, mock_request, client):
         """api_timeout is a server-side parameter, not an HTTP socket timeout.
 
@@ -393,7 +393,7 @@ class TestTimeoutPassed:
         _, kwargs = mock_request.call_args
         assert "timeout" not in kwargs
 
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_explicit_timeout_not_overridden(self, mock_request, client):
         """Callers can still pass an explicit HTTP socket timeout."""
         mock_request.return_value = _mock_response(200)
@@ -407,7 +407,7 @@ class TestTimeoutPassed:
 
 class TestRetryAfterHeader:
     @patch("unstract.api_deployments.client.time.sleep")
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_429_respects_retry_after_header(self, mock_request, mock_sleep, client):
         mock_request.side_effect = [
             _mock_response(429, headers={"Retry-After": "5"}),
@@ -418,7 +418,7 @@ class TestRetryAfterHeader:
         mock_sleep.assert_called_once_with(5.0)
 
     @patch("unstract.api_deployments.client.time.sleep")
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_429_invalid_retry_after_falls_back(self, mock_request, mock_sleep, client):
         mock_request.side_effect = [
             _mock_response(429, headers={"Retry-After": "not-a-number"}),
@@ -437,7 +437,7 @@ class TestRetryAfterHeader:
 
 class TestFileSeekOnRetry:
     @patch("unstract.api_deployments.client.time.sleep")
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_file_objects_rewound_on_retry(self, mock_request, mock_sleep, client):
         file_obj = io.BytesIO(b"test data")
         files = [("files", ("test.pdf", file_obj, "application/octet-stream"))]
@@ -457,7 +457,7 @@ class TestFileSeekOnRetry:
 
 
 class TestDisabledRetry:
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_no_retry_when_max_retries_zero(self, mock_request, client_no_retry):
         mock_request.return_value = _mock_response(503)
         resp = client_no_retry._request_with_retry(
@@ -466,7 +466,7 @@ class TestDisabledRetry:
         assert resp.status_code == 503
         assert mock_request.call_count == 1
 
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_connection_error_raises_immediately_when_disabled(
         self, mock_request, client_no_retry
     ):
@@ -481,7 +481,7 @@ class TestDisabledRetry:
 
 class TestCheckExecutionStatusPendingFix:
     @patch("unstract.api_deployments.client.time.sleep")
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_503_after_exhaustion_sets_pending_true(
         self, mock_request, mock_sleep, client
     ):
@@ -492,7 +492,7 @@ class TestCheckExecutionStatusPendingFix:
         assert result["pending"] is True
         assert result["status_code"] == 503
 
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_200_with_pending_status_sets_pending_true(self, mock_request, client):
         mock_request.return_value = _mock_response(
             200, json_data={"status": "EXECUTING", "error": "", "message": ""}
@@ -501,7 +501,7 @@ class TestCheckExecutionStatusPendingFix:
         assert result["pending"] is True
         assert result["status_code"] == 200
 
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_200_with_completed_status_sets_pending_false(self, mock_request, client):
         mock_request.return_value = _mock_response(
             200,
@@ -514,7 +514,7 @@ class TestCheckExecutionStatusPendingFix:
         result = client.check_execution_status("/api/v1/status/123")
         assert result["pending"] is False
 
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_422_with_executing_status_sets_pending_true(self, mock_request, client):
         """HTTP 422 is currently returned by Unstract for in-progress statuses.
 
@@ -530,7 +530,7 @@ class TestCheckExecutionStatusPendingFix:
         assert result["pending"] is True
         assert result["status_code"] == 422
 
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_422_with_pending_status_sets_pending_true(self, mock_request, client):
         """HTTP 422 with PENDING body status — still detected via body
         check."""
@@ -541,7 +541,7 @@ class TestCheckExecutionStatusPendingFix:
         assert result["pending"] is True
         assert result["status_code"] == 422
 
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_400_does_not_set_pending(self, mock_request, client):
         mock_request.return_value = _mock_response(
             400, json_data={"status": "", "error": "Bad request", "message": ""}
@@ -555,7 +555,7 @@ class TestCheckExecutionStatusPendingFix:
 
 class TestStructureFileUsesRetry:
     @patch("unstract.api_deployments.client.time.sleep")
-    @patch("unstract.api_deployments.client.requests.request")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_structure_file_retries_on_503_async_mode(
         self, mock_request, mock_sleep, tmp_path
     ):
@@ -591,7 +591,7 @@ class TestStructureFileUsesRetry:
 
 
 class TestStructureFileNoRetryInSyncMode:
-    @patch("unstract.api_deployments.client.requests.post")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_structure_file_no_retry_on_503_sync_mode(self, mock_post, tmp_path):
         """In sync mode (api_timeout>0), POST is NOT retried on 5xx."""
         test_file = tmp_path / "test.pdf"
@@ -620,7 +620,7 @@ class TestStructureFileNoRetryInSyncMode:
         # Only one call — no retries in sync mode
         assert mock_post.call_count == 1
 
-    @patch("unstract.api_deployments.client.requests.post")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_structure_file_sync_mode_default_timeout(self, mock_post, tmp_path):
         """Default api_timeout=300 means sync mode — no POST retry."""
         test_file = tmp_path / "test.pdf"
@@ -654,7 +654,7 @@ class TestStructureFileNoRetryInSyncMode:
 
 
 class TestStructureFile422DoesNotSetPending:
-    @patch("unstract.api_deployments.client.requests.post")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_422_pending_does_not_set_pending(self, mock_post, tmp_path):
         """POST 422 with PENDING status should NOT set pending=True.
 
@@ -686,7 +686,7 @@ class TestStructureFile422DoesNotSetPending:
         assert result["pending"] is False
         assert result["status_code"] == 422
 
-    @patch("unstract.api_deployments.client.requests.post")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_422_executing_does_not_set_pending(self, mock_post, tmp_path):
         """POST 422 with EXECUTING status should NOT set pending=True.
 
@@ -717,7 +717,7 @@ class TestStructureFile422DoesNotSetPending:
         assert result["pending"] is False
         assert result["status_code"] == 422
 
-    @patch("unstract.api_deployments.client.requests.post")
+    @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
     def test_200_pending_sets_pending_true(self, mock_post, tmp_path):
         """POST 200 + PENDING correctly sets pending=True for polling."""
         test_file = tmp_path / "test.pdf"

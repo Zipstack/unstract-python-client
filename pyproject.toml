@@ -6,6 +6,10 @@ authors = [
     {name = "Zipstack Inc", email = "devsupport@zipstack.com"},
 ]
 dependencies = [
+    # The transport layer is generated against httpx; attrs backs its models.
+    "httpx>=0.27",
+    "attrs>=23.2",
+    # Kept for its exception classes, which callers catch by name.
     "requests>=2.32.3",
     "tenacity>=8.2.0",
     "click>=8.1",
@@ -64,6 +68,9 @@ lint = [
 
 [tool.ruff]
 line-length = 88
+# Generated code is overwritten wholesale by tools/gen_sdk.sh, so a lint finding
+# there can never be fixed in place.
+extend-exclude = ["src/unstract/api_deployments/sdk_docstudio"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]

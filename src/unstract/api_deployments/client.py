@@ -11,10 +11,15 @@ import logging
 import ntpath
 import os
 import time
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
-import requests
-from requests.exceptions import ConnectionError, JSONDecodeError, Timeout
+import attrs
+import httpx
+
+# `requests` remains a dependency for its exception classes. Downstream code
+# catches ConnectionError and Timeout by name around these calls, and the httpx
+# equivalents are not subclasses, so they are translated at the transport seam.
+from requests.exceptions import ConnectionError, Timeout
 from tenacity import (
     RetryCallState,
     Retrying,
@@ -25,7 +30,34 @@ from tenacity import (
 )
 from tenacity.wait import wait_base
 
+from unstract.api_deployments.sdk_docstudio import AuthenticatedClient
+from unstract.api_deployments.sdk_docstudio.api.deployment import execute, status
+from unstract.api_deployments.sdk_docstudio.models import ExecuteRequest
+from unstract.api_deployments.sdk_docstudio.types import UNSET, File
 from unstract.api_deployments.utils import UnstractUtils
+
+
+def _translate_transport_errors(fn, *args, **kwargs):
+    """Re-raise httpx transport failures as their ``requests`` equivalents.
+
+    Callers document and catch the ``requests`` classes. Ordering matters:
+    ``TimeoutException`` must be checked before ``ConnectError``, and
+    ``TransportError`` is the catch-all that keeps a novel transport failure from
+    escaping untranslated.
+    """
+    try:
+        return fn(*args, **kwargs)
+    except httpx.TimeoutException as e:
+        raise Timeout(str(e)) from e
+    except httpx.ConnectError as e:
+        raise ConnectionError(str(e)) from e
+    except httpx.TransportError as e:
+        raise ConnectionError(str(e)) from e
+
+
+def _query_value(url: str, key: str) -> str:
+    """Read one query parameter out of a URL, absolute or relative."""
+    return parse_qs(urlparse(url).query).get(key, [""])[0]
 
 
 class APIDeploymentsClientException(Exception):
@@ -74,6 +106,16 @@ class _WaitRetryAfterOrExponentialJitter(wait_base):
                     except (ValueError, TypeError):
                         pass
         return self._exp_jitter(retry_state)
+
+
+#: Request fields this client sets itself. Anything outside these sets is reset
+#: to UNSET (body) or filtered out (query) before the request goes out, so no
+#: parameter is sent that the caller did not ask for. A new parameter must be
+#: added here to be sent at all.
+_EXECUTE_SEND_ONLY = frozenset(
+    {"timeout", "include_metadata", "files", "additional_properties"}
+)
+_STATUS_SEND_ONLY = frozenset({"execution_id", "include_metadata"})
 
 
 class APIDeploymentsClient:
@@ -169,6 +211,58 @@ class APIDeploymentsClient:
         self.base_url = parsed_url.scheme + "://" + parsed_url.netloc
         self.logger.debug("Base URL: " + self.base_url)
 
+    @property
+    def _transport(self):
+        """The HTTP client, built on first use.
+
+        No transport timeout is configured, matching the previous behaviour.
+        ``api_timeout`` is a backend execution mode (0 selects async execution),
+        never a socket timeout; feeding it to the transport fails deep in the
+        connection layer for the negative values the API accepts.
+        """
+        if getattr(self, "_transport_client", None) is None:
+            self._transport_client = AuthenticatedClient(
+                base_url=self.base_url,
+                token=self.api_key,
+                verify_ssl=self.verify,
+                timeout=httpx.Timeout(None),
+                raise_on_unexpected_status=False,
+            )
+        return self._transport_client
+
+    @property
+    def _deployment_route(self) -> tuple[str, str]:
+        """Organisation and API name, from the deployment URL's last two segments."""
+        segments = urlparse(self.api_url).path.strip("/").split("/")
+        if len(segments) < 2:
+            raise APIDeploymentsClientException(
+                f"Cannot derive organisation and API name from api_url: {self.api_url}"
+            )
+        return segments[-2], segments[-1]
+
+    def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Issue one request, translating transport failures on the way out.
+
+        Translation happens here rather than around the retry loop, so the retry
+        policy still sees the exception types it is configured to retry.
+        """
+        return _translate_transport_errors(
+            self._transport.get_httpx_client().request, method, url, **kwargs
+        )
+
+    @staticmethod
+    def _read_body(response):
+        """Read the JSON body directly, never the generated response model.
+
+        A model is only built for the statuses the spec declares, and error
+        bodies are typed loosely, so an undeclared status or any error response
+        has no usable model. ``None`` means the body was not JSON.
+        """
+        try:
+            return response.json()
+        except ValueError:
+            return None
+
     @staticmethod
     def _rewind_files(files):
         """Rewinds file objects so they can be re-sent on retry."""
@@ -180,7 +274,7 @@ class APIDeploymentsClient:
                 if hasattr(file_obj[1], "seek"):
                     file_obj[1].seek(0)
 
-    def _request_with_retry(self, method: str, url: str, **kwargs) -> requests.Response:
+    def _request_with_retry(self, method: str, url: str, **kwargs) -> httpx.Response:
         """Makes an HTTP request with exponential backoff retry logic.
 
         Uses ``tenacity`` with additive jitter and Retry-After support.
@@ -188,10 +282,10 @@ class APIDeploymentsClient:
         Args:
             method (str): The HTTP method (e.g., "GET", "POST").
             url (str): The request URL.
-            **kwargs: Additional keyword arguments passed to requests.request().
+            **kwargs: Additional keyword arguments passed to the transport.
 
         Returns:
-            requests.Response: The response from the request.
+            The response from the request.
 
         Raises:
             ConnectionError: If a connection error persists after all retries.
@@ -267,7 +361,7 @@ class APIDeploymentsClient:
             reraise=False,
         )
 
-        return retrier(requests.request, method, url, **kwargs)
+        return retrier(self._send, method, url, **kwargs)
 
     def structure_file(self, file_paths: list[str]) -> dict:
         """Invokes the API deployed on the Unstract platform.
@@ -281,63 +375,61 @@ class APIDeploymentsClient:
         self.logger.debug("Invoking API: " + self.api_url)
         self.logger.debug("File paths: " + str(file_paths))
 
-        headers = {
-            "Authorization": "Bearer " + self.api_key,
-        }
-
-        form_data = {
-            "timeout": self.api_timeout,
-            "include_metadata": self.include_metadata,
-        }
-
-        files = []
-
+        handles = []
         try:
             for file_path in file_paths:
-                record = (
-                    "files",
-                    (
-                        ntpath.basename(file_path),
-                        open(file_path, "rb"),
-                        "application/octet-stream",
-                    ),
-                )
-                files.append(record)
+                handles.append(open(file_path, "rb"))
         except FileNotFoundError as e:
+            for handle in handles:
+                handle.close()
             raise APIDeploymentsClientException("File not found: " + str(e))
 
-        if self.api_timeout == 0:
-            # Async mode: server returns immediately after queuing.
-            # A 5xx means queuing failed — safe to retry.
-            response = self._request_with_retry(
-                "POST",
-                self.api_url,
-                headers=headers,
-                data=form_data,
-                files=files,
-                verify=self.verify,
-            )
-        else:
-            # Sync mode: server blocks during processing.
-            # A 5xx may mean it processed but response was lost — don't retry
-            # to avoid duplicate executions.
-            response = requests.post(
-                self.api_url,
-                headers=headers,
-                data=form_data,
-                files=files,
-                verify=self.verify,
-            )
+        body = ExecuteRequest(
+            timeout=self.api_timeout,
+            include_metadata=self.include_metadata,
+            files=[
+                File(
+                    payload=handle,
+                    file_name=ntpath.basename(file_path),
+                    mime_type="application/octet-stream",
+                )
+                for file_path, handle in zip(file_paths, handles)
+            ],
+        )
+        # Only the fields this client sets are sent. Every other field carries the
+        # spec's declared default, and sending a default is not the same as
+        # omitting it: it pins a value the server would otherwise choose, and the
+        # two diverge the moment the server's own default changes.
+        for field in attrs.fields(ExecuteRequest):
+            if field.name not in _EXECUTE_SEND_ONLY:
+                setattr(body, field.name, UNSET)
+
+        org_name, api_name = self._deployment_route
+        request_kwargs = execute._get_kwargs(org_name, api_name, body=body)
+        method = request_kwargs.pop("method")
+        url = request_kwargs.pop("url")
+
+        try:
+            if self.api_timeout == 0:
+                # Async mode: server returns immediately after queuing.
+                # A 5xx means queuing failed — safe to retry.
+                response = self._request_with_retry(method, url, **request_kwargs)
+            else:
+                # Sync mode: server blocks during processing.
+                # A 5xx may mean it processed but response was lost — don't retry
+                # to avoid duplicate executions.
+                response = self._send(method, url, **request_kwargs)
+        finally:
+            for handle in handles:
+                handle.close()
         self.logger.debug(response.status_code)
         self.logger.debug(response.text)
         # The returned object is wrapped in a "message" key.
         # Let's simplify the response.
         obj_to_return = {}
 
-        try:
-            response_data = response.json()
-            response_message = response_data.get("message", {})
-        except JSONDecodeError:
+        response_data = self._read_body(response)
+        if response_data is None:
             self.logger.error(
                 "Failed to decode JSON response. Raw response: %s",
                 response.text,
@@ -351,6 +443,7 @@ class APIDeploymentsClient:
                 "extraction_result": "",
             }
             return obj_to_return
+        response_message = response_data.get("message", {})
         if response.status_code == 401:
             obj_to_return = {
                 "status_code": response.status_code,
@@ -410,26 +503,33 @@ class APIDeploymentsClient:
             dict: The response from the API.
         """
 
-        headers = {
-            "Authorization": "Bearer " + self.api_key,
+        self.logger.debug(
+            "Checking execution status via endpoint: " + status_check_api_endpoint
+        )
+        org_name, api_name = self._deployment_route
+        request_kwargs = status._get_kwargs(
+            org_name,
+            api_name,
+            execution_id=_query_value(status_check_api_endpoint, "execution_id"),
+            include_metadata=self.include_metadata,
+        )
+        # The generated builder writes every declared query parameter, including
+        # ones this client has never sent. Keep only what was asked for.
+        request_kwargs["params"] = {
+            k: v
+            for k, v in request_kwargs["params"].items()
+            if k in _STATUS_SEND_ONLY
         }
-        status_call_url = self.base_url + status_check_api_endpoint
-        self.logger.debug("Checking execution status via endpoint: " + status_call_url)
         response = self._request_with_retry(
-            "GET",
-            status_call_url,
-            headers=headers,
-            params={"include_metadata": self.include_metadata},
-            verify=self.verify,
+            request_kwargs.pop("method"), request_kwargs.pop("url"), **request_kwargs
         )
         self.logger.debug(response.status_code)
         self.logger.debug(response.text)
 
         obj_to_return = {}
 
-        try:
-            response_data = response.json()
-        except JSONDecodeError:
+        response_data = self._read_body(response)
+        if response_data is None:
             self.logger.error(
                 "Failed to decode JSON response. Raw response: %s",
                 response.text,

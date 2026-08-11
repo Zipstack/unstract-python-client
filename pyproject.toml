@@ -68,9 +68,9 @@ lint = [
 
 [tool.ruff]
 line-length = 88
-# Generated code is overwritten wholesale by tools/gen_sdk.sh, so a lint finding
-# there can never be fixed in place.
-extend-exclude = ["src/unstract/api_deployments/sdk_docstudio"]
+# Generated and vendored code is overwritten wholesale by its refresh script, so
+# a lint finding there can never be fixed in place.
+extend-exclude = ["src/unstract/api_deployments/sdk_docstudio", "tests/baseline"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]

@@ -59,5 +59,9 @@ jobs:
       - name: Regenerate from the committed spec
         run: ./tools/gen_sdk.sh
 
+      # `git add -N` first: a diff alone cannot see a file the generator has
+      # newly created, which is exactly what a spec growing an endpoint does.
       - name: Fail if the committed SDK is not what the spec generates
-        run: git diff --exit-code -- src/unstract/api_deployments/sdk_docstudio
+        run: |
+          git add -N -- src/unstract/api_deployments/sdk_docstudio
+          git diff --exit-code -- src/unstract/api_deployments/sdk_docstudio

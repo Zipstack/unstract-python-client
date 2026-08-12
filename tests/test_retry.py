@@ -488,7 +488,7 @@ class TestCheckExecutionStatusPendingFix:
         mock_request.return_value = _mock_response(
             503, json_data={"status": "", "error": "Service Unavailable", "message": ""}
         )
-        result = client.check_execution_status("/api/v1/status/123")
+        result = client.check_execution_status("/api/v1/status/?execution_id=123")
         assert result["pending"] is True
         assert result["status_code"] == 503
 
@@ -497,7 +497,7 @@ class TestCheckExecutionStatusPendingFix:
         mock_request.return_value = _mock_response(
             200, json_data={"status": "EXECUTING", "error": "", "message": ""}
         )
-        result = client.check_execution_status("/api/v1/status/123")
+        result = client.check_execution_status("/api/v1/status/?execution_id=123")
         assert result["pending"] is True
         assert result["status_code"] == 200
 
@@ -511,7 +511,7 @@ class TestCheckExecutionStatusPendingFix:
                 "message": '{"result": "data"}',
             },
         )
-        result = client.check_execution_status("/api/v1/status/123")
+        result = client.check_execution_status("/api/v1/status/?execution_id=123")
         assert result["pending"] is False
 
     @patch("unstract.api_deployments.client.APIDeploymentsClient._send")
@@ -526,7 +526,7 @@ class TestCheckExecutionStatusPendingFix:
         mock_request.return_value = _mock_response(
             422, json_data={"status": "EXECUTING", "error": "", "message": ""}
         )
-        result = client.check_execution_status("/api/v1/status/123")
+        result = client.check_execution_status("/api/v1/status/?execution_id=123")
         assert result["pending"] is True
         assert result["status_code"] == 422
 
@@ -537,7 +537,7 @@ class TestCheckExecutionStatusPendingFix:
         mock_request.return_value = _mock_response(
             422, json_data={"status": "PENDING", "error": "", "message": ""}
         )
-        result = client.check_execution_status("/api/v1/status/123")
+        result = client.check_execution_status("/api/v1/status/?execution_id=123")
         assert result["pending"] is True
         assert result["status_code"] == 422
 
@@ -546,7 +546,7 @@ class TestCheckExecutionStatusPendingFix:
         mock_request.return_value = _mock_response(
             400, json_data={"status": "", "error": "Bad request", "message": ""}
         )
-        result = client.check_execution_status("/api/v1/status/123")
+        result = client.check_execution_status("/api/v1/status/?execution_id=123")
         assert result["pending"] is False
 
 

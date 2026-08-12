@@ -24,6 +24,7 @@ from requests.exceptions import (
     ConnectionError,
     ConnectTimeout,
     ContentDecodingError,
+    InvalidURL,
     MissingSchema,
     ProxyError,
     ReadTimeout,
@@ -52,9 +53,11 @@ def _translate_transport_errors(fn, *args, **kwargs):
 
     Callers document and catch the ``requests`` classes, and the retry policy
     keys off them too, so the class chosen here decides whether a failure is
-    retried. Every branch is ordered before the base class it derives from, and
-    ``RequestError`` is the catch-all that keeps a novel failure from escaping
-    untranslated.
+    retried. Every branch is ordered before the base class it derives from.
+    ``RequestError`` is the catch-all for the transport subtree, which is where
+    a novel failure appears. httpx puts three families outside it: ``InvalidURL``,
+    translated here because ``requests`` raised its own, and ``StreamError`` and
+    ``CookieConflict``, which propagate as themselves.
     """
     try:
         return fn(*args, **kwargs)
@@ -82,13 +85,25 @@ def _translate_transport_errors(fn, *args, **kwargs):
         raise TooManyRedirects(str(e)) from e
     except httpx.DecodingError as e:
         raise ContentDecodingError(str(e)) from e
+    except httpx.InvalidURL as e:
+        raise InvalidURL(str(e)) from e
     except httpx.RequestError as e:
         raise ConnectionError(str(e)) from e
 
 
 def _query_value(url: str, key: str) -> str:
-    """Read one query parameter out of a URL, absolute or relative."""
-    return parse_qs(urlparse(url).query).get(key, [""])[0]
+    """Read one required query parameter out of a URL, absolute or relative.
+
+    Empty is not a usable value here: it polls for an execution the service
+    cannot identify and reports whatever it makes of a blank id.
+    """
+    value = parse_qs(urlparse(url).query).get(key, [""])[0]
+    if not value:
+        raise APIDeploymentsClientException(
+            f"No {key} in {url!r}. The status endpoint the service returned "
+            "carries it; pass that endpoint unmodified."
+        )
+    return value
 
 
 class APIDeploymentsClientException(Exception):
@@ -266,6 +281,10 @@ class APIDeploymentsClient:
                 verify_ssl=self.verify,
                 timeout=httpx.Timeout(self.transport_timeout),
                 raise_on_unexpected_status=False,
+                # The previous transport followed redirects. Without this a 30x
+                # from a load balancer is read as a terminal result with no
+                # status, which a poll loop reports as a finished-and-empty job.
+                follow_redirects=True,
             )
         return self._transport_client
 

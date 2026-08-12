@@ -13,6 +13,7 @@ import importlib.util
 import inspect
 import io
 import json
+import re
 import socket
 import threading
 from pathlib import Path
@@ -38,6 +39,7 @@ from unstract.api_deployments.client import (
     _EXECUTE_SEND_ONLY,
     _STATUS_SEND_ONLY,
     APIDeploymentsClient,
+    APIDeploymentsClientException,
 )
 
 BASELINE_VERSION = "1.5.3"
@@ -623,15 +625,15 @@ def test_execute_url_matches_the_deployment_url(api_url):
     assert args[1] == api_url == mock_requests.post.call_args[0][0]
 
 
-def _wire_heads(*calls):
-    """Run each call against a loopback server and return its request headers.
+def _wire_requests(*calls, reply=b'{"status":"COMPLETED","message":{}}'):
+    """Run each call against a loopback server and return the raw requests.
 
     Below the client, the transport adds headers of its own -- and drops none
     of them into any object the client can be asked for. A socket is the only
     place both clients can be compared on what they actually send. One server
     serves every call, so the ``Host`` header is the same for all of them.
     """
-    heads = []
+    raw = []
     server = socket.socket()
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("127.0.0.1", 0))
@@ -646,8 +648,17 @@ def _wire_heads(*calls):
                 if not chunk:
                     break
                 data += chunk
-            heads.append(data.split(b"\r\n\r\n")[0])
-            body = b'{"status":"COMPLETED","message":[]}'
+            # The body has to be drained too: a client whose upload is never
+            # read can block on the socket instead of returning.
+            head, _, rest = data.partition(b"\r\n\r\n")
+            declared = _header_value(head, "content-length")
+            while declared and len(rest) < int(declared):
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                rest += chunk
+            raw.append(head + b"\r\n\r\n" + rest)
+            body = reply
             conn.sendall(
                 b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
                 b"Content-Length: %d\r\n\r\n%s" % (len(body), body)
@@ -664,15 +675,51 @@ def _wire_heads(*calls):
         thread.join(timeout=10)
         server.close()
 
-    return [
-        {
-            name.lower(): value.strip()
-            for name, _, value in (
-                line.partition(":") for line in head.decode().split("\r\n")[1:]
+    return raw
+
+
+def _headers(head: bytes) -> dict[str, str]:
+    return {
+        name.lower(): value.strip()
+        for name, _, value in (
+            line.partition(":") for line in head.decode().split("\r\n")[1:]
+        )
+    }
+
+
+def _header_value(head: bytes, name: str) -> str:
+    return _headers(head).get(name, "")
+
+
+def _wire_heads(*calls):
+    """The request headers each call put on the wire."""
+    return [_headers(raw.split(b"\r\n\r\n")[0]) for raw in _wire_requests(*calls)]
+
+
+def _multipart_parts(raw: bytes) -> list[tuple[str, str, bytes]]:
+    """``(field, filename, content)`` for every part of a multipart request.
+
+    The boundary itself is deliberately not compared: it is random per request
+    in both clients, so only what it delimits can be.
+    """
+    head, _, body = raw.partition(b"\r\n\r\n")
+    boundary = _header_value(head, "content-type").partition("boundary=")[2]
+    parts = []
+    for chunk in body.split(b"--" + boundary.encode()):
+        headers, _, content = chunk.partition(b"\r\n\r\n")
+        disposition = headers.decode("utf-8", errors="replace")
+        if "content-disposition" not in disposition.lower():
+            continue
+        field = re.search(r'name="([^"]*)"', disposition)
+        filename = re.search(r'filename="([^"]*)"', disposition)
+        parts.append(
+            (
+                field.group(1) if field else "",
+                filename.group(1) if filename else "",
+                content.removesuffix(b"\r\n"),
             )
-        }
-        for head in heads
-    ]
+        )
+    return parts
 
 
 def test_wire_headers_match_the_released_client():
@@ -695,6 +742,50 @@ def test_wire_headers_match_the_released_client():
     # The one accepted difference: the transport names itself, and nothing on
     # the wire branches on it.
     assert ours["user-agent"].startswith("python-httpx/")
+
+
+def test_a_multi_file_upload_matches_the_released_client(tmp_path):
+    """The method takes a list, and the second file is where a transport swap
+    diverges: one part written, one dropped, or two parts sharing a name the
+    server then reads as one."""
+    paths = []
+    for name, content in (("first.txt", b"one"), ("second.txt", b"two")):
+        path = tmp_path / name
+        path.write_bytes(content)
+        paths.append(str(path))
+
+    ours, theirs = _wire_requests(
+        lambda url: _client(api_url=url, api_timeout=300).structure_file(paths),
+        lambda url: _baseline_client(api_url=url, api_timeout=300).structure_file(
+            paths
+        ),
+    )
+
+    # Sorted: the two clients order the fields differently, which no multipart
+    # parser reads as meaning. The order of the files among themselves is the
+    # part that carries meaning, and it is pinned below.
+    assert sorted(_multipart_parts(ours)) == sorted(_multipart_parts(theirs))
+    uploaded = [part for part in _multipart_parts(ours) if part[0] == "files"]
+    assert [(filename, content) for _, filename, content in uploaded] == [
+        ("first.txt", b"one"),
+        ("second.txt", b"two"),
+    ]
+
+
+def test_redirects_are_followed():
+    """The released client followed them on both verbs.
+
+    Not following one turns a load balancer's 307 into a body the poll loop
+    reads as a finished execution with no status.
+    """
+    assert _client()._transport.get_httpx_client().follow_redirects is True
+
+
+def test_a_status_endpoint_without_an_execution_id_is_refused():
+    """Polling with a blank id asks the service about an execution nobody has;
+    what it answers is not this execution's state."""
+    with pytest.raises(APIDeploymentsClientException):
+        _client().check_execution_status("/deployment/api/testorg/testapi/")
 
 
 def test_the_transport_is_untimed_by_default():

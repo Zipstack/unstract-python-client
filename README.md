@@ -100,16 +100,16 @@ client = APIDeploymentsClient(
 The retry logic uses exponential backoff with full jitter and respects the `Retry-After` header on 429 responses.
 
 
-## Unstract CLI
+## Cloning an organization
 
-Installing `unstract-client` also provides the `unstract` command:
+Installing `unstract-client` also provides a clone command:
 
 ```bash
 pip install unstract-client
-unstract --help
+python -m unstract.clone --help
 ```
 
-### `unstract clone`
+### `python -m unstract.clone`
 
 Clones an organization's resources to another org, on the same or a different
 deployment (e.g. promote **dev** → **QA** → **prod**). Covers adapters,
@@ -124,7 +124,7 @@ so keys never land in shell history:
 export UNSTRACT_SRC_PLATFORM_KEY="<source platform key>"
 export UNSTRACT_TGT_PLATFORM_KEY="<target platform key>"
 
-unstract clone \
+python -m unstract.clone \
   --source-url https://dev.example.com --source-org org_dev123 \
   --target-url https://qa.example.com --target-org org_qa456 \
   --dry-run
@@ -152,14 +152,14 @@ failed run can be resumed by re-running the same command.
 
 #### Compatibility
 
-`unstract clone` is capability-probed: each phase checks for its endpoint on the
+Cloning is capability-probed: each phase checks for its endpoint on the
 source and target, and clones only what both orgs support. A capability missing on
 either side is reported and skipped — the run never fails because of a version
 difference. Cloning a newer source into an older target therefore drops the entity
 types the target lacks (listed in the end-of-run report).
 
 - Run the source and target on the same (or a newer-target) Unstract build.
-- Use `unstract-client >= 1.4.0`, the first release that ships `unstract clone`.
+- Use `unstract-client >= 1.4.0`, the first release that ships the clone command.
 
 ## Questions and Feedback
 

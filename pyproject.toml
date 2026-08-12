@@ -7,7 +7,9 @@ authors = [
 ]
 dependencies = [
     # The transport layer is generated against httpx; attrs backs its models.
-    "httpx>=0.27",
+    # Upper-bounded because the generated code is written against one minor
+    # series: a bump has to be regenerated and re-tested, not resolved into.
+    "httpx>=0.27,<0.29",
     "attrs>=23.2",
     # Kept for its exception classes, which callers catch by name.
     "requests>=2.32.3",

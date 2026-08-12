@@ -37,3 +37,27 @@ jobs:
 
       - name: Tests (pytest)
         run: uv run pytest tests/ -v
+
+  sdk-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.6.14"
+          enable-cache: true
+
+      # The generated tree is committed, so an edit to it reviews like any
+      # other change and then disappears on the next regeneration. Same for a
+      # spec change that never had the generator run over it.
+      - name: Regenerate from the committed spec
+        run: ./tools/gen_sdk.sh
+
+      - name: Fail if the committed SDK is not what the spec generates
+        run: git diff --exit-code -- src/unstract/api_deployments/sdk_docstudio

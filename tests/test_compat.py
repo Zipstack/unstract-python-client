@@ -8,6 +8,7 @@ by running the released client side by side over the same responses.
 """
 
 import ast
+import hashlib
 import importlib.util
 import inspect
 import io
@@ -41,6 +42,7 @@ from unstract.api_deployments.client import (
 
 BASELINE_VERSION = "1.5.3"
 BASELINE_PATH = Path(__file__).parent / "baseline" / "client_1_5_3.py"
+BASELINE_SHA256 = "45201bb0de000e8f3a0e65f40cb0b08fec389514f7a17c8bb3410a3dc59229df"
 SPEC_PATH = Path(__file__).parents[1] / "specs" / "docstudio-oss.json"
 
 API_URL = "https://api.example.com/deployment/api/testorg/testapi/"
@@ -969,6 +971,8 @@ def test_every_declared_operation_is_wrapped():
     assert declared == WRAPPED_OPERATIONS
 
 
-def test_the_baseline_is_a_released_version():
+def test_the_baseline_is_the_released_client_unmodified():
+    # A digest, not a version string in a comment: an edited baseline can claim
+    # any provenance it likes, and every parity test here would still pass.
     assert BASELINE_PATH.name == f"client_{BASELINE_VERSION.replace('.', '_')}.py"
-    assert "DO NOT EDIT" in BASELINE_PATH.read_text(encoding="utf-8")
+    assert hashlib.sha256(BASELINE_PATH.read_bytes()).hexdigest() == BASELINE_SHA256

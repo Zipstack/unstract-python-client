@@ -25,4 +25,6 @@ OUT="$REPO/tests/baseline/client_$SLUG.py"
 } > "$OUT"
 
 echo "wrote $OUT"
-echo "update BASELINE_VERSION in tests/test_compat.py to match"
+echo "in tests/test_compat.py set:"
+echo "  BASELINE_VERSION = \"$VERSION\""
+echo "  BASELINE_SHA256 = \"$(sha256sum "$OUT" | cut -d' ' -f1)\""

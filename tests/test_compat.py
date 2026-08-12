@@ -12,6 +12,8 @@ import importlib.util
 import inspect
 import io
 import json
+import socket
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
@@ -576,24 +578,78 @@ def test_execute_url_matches_the_deployment_url(api_url):
     assert args[1] == api_url == mock_requests.post.call_args[0][0]
 
 
-def test_request_headers_match_the_released_client():
-    """The headers a caller never sets are still on the wire.
+def _wire_heads(*calls):
+    """Run each call against a loopback server and return its request headers.
 
-    ``requests`` sent its session defaults; httpx sends its own, and
-    ``Accept-Encoding`` in particular decides whether responses come back
-    compressed. Taken from ``requests`` rather than copied, so this compares
-    against what the released client would send today.
+    Below the client, the transport adds headers of its own -- and drops none
+    of them into any object the client can be asked for. A socket is the only
+    place both clients can be compared on what they actually send. One server
+    serves every call, so the ``Host`` header is the same for all of them.
     """
-    client = _client()
-    request = client._transport.get_httpx_client().build_request("POST", API_URL)
-    published = requests.utils.default_headers()
+    heads = []
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(len(calls))
 
-    for name in ("Accept", "Accept-Encoding", "Connection"):
-        assert request.headers[name] == published[name]
-    assert request.headers["Authorization"] == "Bearer test-key"
+    def serve():
+        for _ in calls:
+            conn, _address = server.accept()
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+            heads.append(data.split(b"\r\n\r\n")[0])
+            body = b'{"status":"COMPLETED","message":[]}'
+            conn.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                b"Content-Length: %d\r\n\r\n%s" % (len(body), body)
+            )
+            conn.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.getsockname()[1]}/deployment/api/org/name/"
+        for call in calls:
+            call(url)
+    finally:
+        thread.join(timeout=10)
+        server.close()
+
+    return [
+        {
+            name.lower(): value.strip()
+            for name, _, value in (
+                line.partition(":") for line in head.decode().split("\r\n")[1:]
+            )
+        }
+        for head in heads
+    ]
+
+
+def test_wire_headers_match_the_released_client():
+    """The headers no caller sets are still on the wire.
+
+    ``Accept-Encoding`` is the load-bearing one: it decides whether responses
+    come back compressed at all.
+    """
+    ours, theirs = _wire_heads(
+        lambda url: _client(api_url=url).check_execution_status(STATUS_ENDPOINT),
+        lambda url: _baseline_client(api_url=url).check_execution_status(
+            STATUS_ENDPOINT
+        ),
+    )
+
+    assert {name: ours[name] for name in theirs if name != "user-agent"} == {
+        name: value for name, value in theirs.items() if name != "user-agent"
+    }
+    assert ours.keys() == theirs.keys()
     # The one accepted difference: the transport names itself, and nothing on
     # the wire branches on it.
-    assert request.headers["User-Agent"].startswith("python-httpx/")
+    assert ours["user-agent"].startswith("python-httpx/")
 
 
 def test_deployment_route_rejects_an_unusable_url():

@@ -396,13 +396,56 @@ def test_multipart_boundary_is_random_and_matches_the_body(sample_file):
     assert boundaries[0] != boundaries[1]
 
 
-def test_status_sends_only_the_fields_the_client_sets():
-    client = _client()
+def _captured_status_params(client=None, **request_params):
+    client = client or _client()
     with patch.object(APIDeploymentsClient, "_send") as mock_send:
         mock_send.return_value = _httpx_response(200, {"status": "COMPLETED"})
-        client.check_execution_status(STATUS_ENDPOINT)
-    _, kwargs = mock_send.call_args
-    assert set(kwargs["params"]) == {"execution_id", "include_metadata"}
+        client.check_execution_status(STATUS_ENDPOINT, **request_params)
+    return mock_send.call_args[1]["params"]
+
+
+def test_status_sends_only_the_fields_the_client_sets():
+    assert set(_captured_status_params()) == {"execution_id", "include_metadata"}
+
+
+def test_status_request_parameters_are_named_as_the_spec_names_them():
+    """A rename here would need a translation table in every caller."""
+    spec = json.loads(SPEC_PATH.read_text())
+    execute = "/deployment/api/{org_name}/{api_name}/"
+    declared = {
+        p["name"]
+        for p in spec["paths"][execute]["get"]["parameters"]
+        if p["in"] == "query"
+    }
+    accepted = {
+        name
+        for name, p in inspect.signature(
+            APIDeploymentsClient.check_execution_status
+        ).parameters.items()
+        if p.kind is p.KEYWORD_ONLY
+    }
+    # `execution_id` is read out of the endpoint URL the server handed back.
+    assert accepted == declared - {"execution_id"}
+
+
+def test_status_request_parameters_are_keyword_only():
+    with pytest.raises(TypeError):
+        _client().check_execution_status(STATUS_ENDPOINT, True)
+
+
+def test_a_requested_status_parameter_is_sent():
+    params = _captured_status_params(include_metrics=True, include_extracted_text=False)
+    assert params["include_metrics"] is True
+    # False is a choice; a truthiness filter would drop it and hand the decision
+    # back to the server.
+    assert params["include_extracted_text"] is False
+
+
+def test_a_requested_status_parameter_overrides_the_constructor():
+    params = _captured_status_params(
+        _client(include_metadata=False), include_metadata=True
+    )
+    assert params["include_metadata"] is True
     assert _STATUS_SEND_ONLY == {"execution_id", "include_metadata"}
 
 

@@ -556,12 +556,27 @@ class APIDeploymentsClient:
 
         return obj_to_return
 
-    def check_execution_status(self, status_check_api_endpoint: str) -> dict:
+    def check_execution_status(
+        self,
+        status_check_api_endpoint: str,
+        *,
+        include_metadata: bool | Unset = UNSET,
+        include_metrics: bool | Unset = UNSET,
+        include_extracted_text: bool | Unset = UNSET,
+    ) -> dict:
         """Checks the status of the execution.
+
+        The keyword arguments are the query parameters the endpoint accepts,
+        named as the API names them. One left unset is not sent at all, so the
+        server picks its own default; ``include_metadata`` falls back to the
+        value given at construction.
 
         Args:
             status_check_api_endpoint (str):
                 The API endpoint to check the status of the execution.
+            include_metadata (bool): Include metadata in the result.
+            include_metrics (bool): Include metrics in the result.
+            include_extracted_text (bool): Include the extracted text.
 
         Returns:
             dict: The response from the API.
@@ -570,17 +585,26 @@ class APIDeploymentsClient:
         self.logger.debug(
             "Checking execution status via endpoint: " + status_check_api_endpoint
         )
+        requested = {
+            "include_metadata": include_metadata,
+            "include_metrics": include_metrics,
+            "include_extracted_text": include_extracted_text,
+        }
+        requested = {k: v for k, v in requested.items() if not isinstance(v, Unset)}
+        params = {"include_metadata": self.include_metadata, **requested}
+
         org_name, api_name = self._deployment_route
         request_kwargs = status._get_kwargs(
             org_name,
             api_name,
             execution_id=_query_value(status_check_api_endpoint, "execution_id"),
-            include_metadata=self.include_metadata,
+            **params,
         )
         # The generated builder writes every declared query parameter, including
         # ones this client has never sent. Keep only what was asked for.
+        send_only = _STATUS_SEND_ONLY | requested.keys()
         request_kwargs["params"] = {
-            k: v for k, v in request_kwargs["params"].items() if k in _STATUS_SEND_ONLY
+            k: v for k, v in request_kwargs["params"].items() if k in send_only
         }
         response = self._request_with_retry(
             request_kwargs.pop("method"), request_kwargs.pop("url"), **request_kwargs

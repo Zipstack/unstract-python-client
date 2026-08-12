@@ -652,6 +652,59 @@ def test_wire_headers_match_the_released_client():
     assert ours["user-agent"].startswith("python-httpx/")
 
 
+def test_the_transport_is_untimed_by_default():
+    """A connection that stalls forever is what the released client did.
+
+    Bounding it by default would turn a hang into an exception callers have
+    never had to handle, and ``api_timeout`` cannot serve: it is an execution
+    mode the backend reads, not a socket timeout.
+    """
+    assert _client()._transport.get_httpx_client().timeout == httpx.Timeout(None)
+
+
+def test_transport_timeout_is_what_the_transport_uses():
+    assert _client(transport_timeout=5)._transport.get_httpx_client().timeout == (
+        httpx.Timeout(5)
+    )
+
+
+def test_transport_timeout_bounds_a_stalled_connection():
+    """The call is made off the test thread, so the failure this pins -- a
+    request that never returns -- fails the test instead of hanging the run."""
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    accepted, outcome = [], []
+
+    def stall():
+        conn, _address = server.accept()
+        accepted.append(conn)  # held open, and answered by nobody
+
+    def call():
+        url = f"http://127.0.0.1:{server.getsockname()[1]}/deployment/api/org/name/"
+        client = _client(api_url=url, transport_timeout=0.2)
+        try:
+            client.check_execution_status(STATUS_ENDPOINT)
+            outcome.append(None)
+        except BaseException as e:  # noqa: BLE001 - reported, not handled
+            outcome.append(e)
+
+    stalling = threading.Thread(target=stall, daemon=True)
+    calling = threading.Thread(target=call, daemon=True)
+    stalling.start()
+    calling.start()
+    try:
+        calling.join(timeout=10)
+        assert outcome, "the request never returned"
+        assert isinstance(outcome[0], ReadTimeout)
+    finally:
+        stalling.join(timeout=5)
+        for conn in accepted:
+            conn.close()
+        server.close()
+
+
 def test_deployment_route_rejects_an_unusable_url():
     from unstract.api_deployments.client import APIDeploymentsClientException
 
@@ -825,7 +878,9 @@ def test_constructor_parameters_are_unchanged():
     live_params = [
         (name, None if p.default is inspect.Parameter.empty else p.default)
         for name, p in live.items()
-        if name != "self"
+        # Keyword-only parameters are excluded: they cannot be reached by any
+        # existing call, so adding one leaves every released call shape intact.
+        if name != "self" and p.kind is not p.KEYWORD_ONLY
     ]
     assert live_params == _baseline_init_params()
 

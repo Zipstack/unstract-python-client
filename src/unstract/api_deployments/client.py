@@ -177,6 +177,8 @@ class APIDeploymentsClient:
         max_delay: float = 60.0,
         backoff_factor: float = 2.0,
         jitter: float = 1.0,
+        *,
+        transport_timeout: float | None = None,
     ):
         """Initializes the APIClient class.
 
@@ -189,6 +191,10 @@ class APIDeploymentsClient:
             max_delay (float): Maximum delay in seconds between retries.
             backoff_factor (float): Multiplier applied to delay for each retry.
             jitter (float): Maximum additive jitter in seconds added to each delay.
+            transport_timeout (float | None): Socket timeout in seconds. Unset
+                means a stalled connection blocks forever, which is what the
+                released client did; ``api_timeout`` cannot serve here because
+                it is an execution mode, not a socket timeout.
         """
         if logging_level == "":
             logging_level = os.getenv("UNSTRACT_API_CLIENT_LOGGING_LEVEL", "INFO")
@@ -220,6 +226,7 @@ class APIDeploymentsClient:
         self.max_delay = max_delay
         self.backoff_factor = backoff_factor
         self.jitter = jitter
+        self.transport_timeout = transport_timeout
 
     def _is_retryable_status(self, status_code: int) -> bool:
         """Checks whether a status code should trigger a retry.
@@ -246,17 +253,18 @@ class APIDeploymentsClient:
     def _transport(self):
         """The HTTP client, built on first use.
 
-        No transport timeout is configured, matching the previous behaviour.
-        ``api_timeout`` is a backend execution mode (0 selects async execution),
-        never a socket timeout; feeding it to the transport fails deep in the
-        connection layer for the negative values the API accepts.
+        Untimed by default, matching the previous behaviour. ``api_timeout`` is
+        a backend execution mode (0 selects async execution), never a socket
+        timeout; feeding it to the transport fails deep in the connection layer
+        for the negative values the API accepts. ``transport_timeout`` is the
+        way to bound a stalled connection.
         """
         if getattr(self, "_transport_client", None) is None:
             self._transport_client = AuthenticatedClient(
                 base_url=self.base_url,
                 token=self.api_key,
                 verify_ssl=self.verify,
-                timeout=httpx.Timeout(None),
+                timeout=httpx.Timeout(self.transport_timeout),
                 raise_on_unexpected_status=False,
             )
         return self._transport_client

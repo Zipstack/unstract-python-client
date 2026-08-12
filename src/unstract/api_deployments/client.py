@@ -460,9 +460,9 @@ class APIDeploymentsClient:
             "presigned_urls": presigned_urls,
             "custom_data": custom_data,
         }
-        # ``None`` is dropped with ``UNSET``: these are optional overrides, and
-        # a form field carries no null — the previous transport would have sent
-        # the literal string "None" for the service to look up.
+        # ``None`` is dropped with ``UNSET``: these are optional overrides, and a
+        # form field carries no null, so one would go out as the string "None"
+        # for the service to look up.
         requested = {
             k: v
             for k, v in requested.items()
@@ -518,13 +518,12 @@ class APIDeploymentsClient:
 
         try:
             if params["timeout"] == 0:
-                # Async mode: server returns immediately after queuing.
-                # A 5xx means queuing failed — safe to retry.
+                # The request only queues the execution, so a 5xx means queuing
+                # failed and retrying cannot duplicate work.
                 response = self._request_with_retry(method, url, **request_kwargs)
             else:
-                # Sync mode: server blocks during processing.
-                # A 5xx may mean it processed but response was lost — don't retry
-                # to avoid duplicate executions.
+                # The request runs the execution, so a 5xx may mean it ran and
+                # the response was lost: a retry would execute it twice.
                 response = self._send(method, url, **request_kwargs)
         finally:
             for handle in handles:

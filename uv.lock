@@ -900,7 +900,7 @@ test = [
 requires-dist = [
     { name = "attrs", specifier = ">=23.2" },
     { name = "click", specifier = ">=8.1" },
-    { name = "httpx", specifier = ">=0.27" },
+    { name = "httpx", specifier = ">=0.27,<0.29" },
     { name = "requests", specifier = ">=2.32.3" },
     { name = "rich", specifier = ">=13.7" },
     { name = "tenacity", specifier = ">=8.2.0" },

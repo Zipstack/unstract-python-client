@@ -546,6 +546,31 @@ def test_status_url_matches_the_released_client():
 
 
 @pytest.mark.parametrize(
+    "endpoint",
+    [
+        # What the server actually returns, and the only spelling the released
+        # client handled: it concatenated base URL and endpoint, so an absolute
+        # one produced `https://hosthttps://host/...` and a relative one with
+        # no leading slash produced `https://hostdeployment/...`.
+        "/deployment/api/testorg/testapi/?execution_id=exec-123",
+        "https://api.example.com/deployment/api/testorg/testapi/?execution_id=exec-123",
+        "deployment/api/testorg/testapi/?execution_id=exec-123",
+    ],
+)
+def test_the_status_endpoint_is_read_not_concatenated(endpoint):
+    """Only the execution id is taken from the server's endpoint; the route
+    comes from the spec. Every spelling therefore resolves to one request."""
+    client = _client()
+    with patch.object(APIDeploymentsClient, "_send") as mock_send:
+        mock_send.return_value = _httpx_response(200, {"status": "COMPLETED"})
+        client.check_execution_status(endpoint)
+    args, kwargs = mock_send.call_args
+    assert args[0].lower() == "get"
+    assert str(httpx.URL(client.base_url).join(args[1])) == API_URL
+    assert kwargs["params"]["execution_id"] == "exec-123"
+
+
+@pytest.mark.parametrize(
     "api_url",
     [
         API_URL,

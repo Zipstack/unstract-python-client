@@ -460,7 +460,14 @@ class APIDeploymentsClient:
             "presigned_urls": presigned_urls,
             "custom_data": custom_data,
         }
-        requested = {k: v for k, v in requested.items() if not isinstance(v, Unset)}
+        # ``None`` is dropped with ``UNSET``: these are optional overrides, and
+        # a form field carries no null — the previous transport would have sent
+        # the literal string "None" for the service to look up.
+        requested = {
+            k: v
+            for k, v in requested.items()
+            if not isinstance(v, Unset) and v is not None
+        }
         params = {
             "timeout": self.api_timeout,
             "include_metadata": self.include_metadata,

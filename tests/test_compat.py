@@ -473,6 +473,24 @@ def test_status_sends_only_the_fields_the_client_sets():
     assert set(_captured_status_params()) == {"execution_id", "include_metadata"}
 
 
+@pytest.mark.parametrize(
+    ("api_url", "expected"),
+    [
+        (API_URL, "https://api.example.com/deployment/api/testorg/testapi/"),
+        (
+            "https://api.example.com/unstract/deployment/api/testorg/testapi/",
+            "https://api.example.com/unstract/deployment/api/testorg/testapi/",
+        ),
+    ],
+)
+def test_status_is_polled_under_the_deployment_urls_own_prefix(api_url, expected):
+    """A poll that misses is a paid execution whose result is never collected."""
+    with patch.object(APIDeploymentsClient, "_send") as mock_send:
+        mock_send.return_value = _httpx_response(200, {"status": "COMPLETED"})
+        _client(api_url=api_url).check_execution_status(STATUS_ENDPOINT)
+    assert mock_send.call_args[0][1] == expected
+
+
 def test_status_request_parameters_are_named_as_the_spec_names_them():
     """A rename here would need a translation table in every caller."""
     spec = json.loads(SPEC_PATH.read_text())

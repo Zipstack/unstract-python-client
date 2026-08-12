@@ -280,6 +280,20 @@ class APIDeploymentsClient:
             )
         return segments[-2], segments[-1]
 
+    def _resolve(self, path: str) -> str:
+        """Absolute URL for a spec-relative path, under the deployment's own prefix.
+
+        ``base_url`` is scheme and host only, so a deployment served under a path
+        prefix would execute -- the execute call sends the caller's URL verbatim
+        -- and then never poll. The prefix is whatever precedes the route inside
+        the deployment URL; when the two do not line up, nothing is prepended.
+        """
+        route = path.rstrip("/")
+        prefix = urlparse(self.api_url).path.rstrip("/")
+        if not route or not prefix.endswith(route):
+            return self.base_url + path
+        return self.base_url + prefix[: -len(route)] + path
+
     def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
         """Issue one request, translating transport failures on the way out.
 
@@ -654,7 +668,9 @@ class APIDeploymentsClient:
             if k in send_only
         }
         response = self._request_with_retry(
-            request_kwargs.pop("method"), request_kwargs.pop("url"), **request_kwargs
+            request_kwargs.pop("method"),
+            self._resolve(request_kwargs.pop("url")),
+            **request_kwargs,
         )
         self.logger.debug(response.status_code)
         self.logger.debug(response.text)

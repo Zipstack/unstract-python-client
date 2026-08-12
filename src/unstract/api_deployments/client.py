@@ -471,7 +471,11 @@ class APIDeploymentsClient:
         # the transport pick a random boundary instead.
         request_kwargs.get("headers", {}).pop("Content-Type", None)
         method = request_kwargs.pop("method")
-        url = request_kwargs.pop("url")
+        request_kwargs.pop("url")
+        # The deployment URL is the caller's, sent back verbatim. Rebuilding it
+        # from the spec's path template drops any prefix the deployment is
+        # served under, which no route template can express.
+        url = self.api_url
 
         try:
             if params["timeout"] == 0:

@@ -481,15 +481,37 @@ def test_status_url_matches_the_released_client():
     assert ours_query == published_query
 
 
-def test_execute_url_matches_the_deployment_url():
-    client = _client()
+@pytest.mark.parametrize(
+    "api_url",
+    [
+        API_URL,
+        # Nothing normalises the deployment URL on the way in, so whatever the
+        # caller registered is what the released client posted to.
+        API_URL.rstrip("/"),
+        "https://api.example.com/unstract/deployment/api/testorg/testapi/",
+        "https://api.example.com/deployment/api/TestOrg/testapi/",
+    ],
+)
+def test_execute_url_matches_the_deployment_url(api_url):
+    """The deployment URL goes back out as given.
+
+    A path prefix — an ingress route, an on-prem reverse proxy — is part of it
+    and no route template can carry it, so the URL cannot be rebuilt from one.
+    """
+    client = _client(api_url=api_url)
     with patch.object(APIDeploymentsClient, "_send") as mock_send:
         mock_send.return_value = _httpx_response(200, {"message": {}})
         with patch("builtins.open", return_value=io.BytesIO(b"x")):
             client.structure_file(["sample.txt"])
     args, _ = mock_send.call_args
+
+    with patch.object(baseline, "requests") as mock_requests:
+        mock_requests.post.return_value = _requests_response(200, {"message": {}})
+        with patch("builtins.open", return_value=io.BytesIO(b"x")):
+            _baseline_client(api_url=api_url).structure_file(["sample.txt"])
+
     assert args[0].lower() == "post"
-    assert str(httpx.URL(client.base_url).join(args[1])) == API_URL
+    assert args[1] == api_url == mock_requests.post.call_args[0][0]
 
 
 def test_deployment_route_rejects_an_unusable_url():

@@ -603,8 +603,13 @@ class APIDeploymentsClient:
         # The generated builder writes every declared query parameter, including
         # ones this client has never sent. Keep only what was asked for.
         send_only = _STATUS_SEND_ONLY | requested.keys()
+        # Booleans are spelled the way urlencoding a Python bool spells them,
+        # which is what the released client sent. The service reads either, but
+        # traffic diffed against the previous release should show no change.
         request_kwargs["params"] = {
-            k: v for k, v in request_kwargs["params"].items() if k in send_only
+            k: str(v) if isinstance(v, bool) else v
+            for k, v in request_kwargs["params"].items()
+            if k in send_only
         }
         response = self._request_with_retry(
             request_kwargs.pop("method"), request_kwargs.pop("url"), **request_kwargs

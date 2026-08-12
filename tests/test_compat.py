@@ -434,17 +434,17 @@ def test_status_request_parameters_are_keyword_only():
 
 def test_a_requested_status_parameter_is_sent():
     params = _captured_status_params(include_metrics=True, include_extracted_text=False)
-    assert params["include_metrics"] is True
+    assert params["include_metrics"] == "True"
     # False is a choice; a truthiness filter would drop it and hand the decision
     # back to the server.
-    assert params["include_extracted_text"] is False
+    assert params["include_extracted_text"] == "False"
 
 
 def test_a_requested_status_parameter_overrides_the_constructor():
     params = _captured_status_params(
         _client(include_metadata=False), include_metadata=True
     )
-    assert params["include_metadata"] is True
+    assert params["include_metadata"] == "True"
     assert _STATUS_SEND_ONLY == {"execution_id", "include_metadata"}
 
 
@@ -459,11 +459,12 @@ def test_status_url_matches_the_released_client():
         mock_send.return_value = _httpx_response(200, {"status": "COMPLETED"})
         client.check_execution_status(STATUS_ENDPOINT)
     args, kwargs = mock_send.call_args
-    ours = urlparse(str(httpx.URL(client.base_url).join(args[1])))
-    ours_query = {
-        **parse_qs(ours.query),
-        **{k: [str(v)] for k, v in kwargs["params"].items()},
-    }
+    # Encoded by the transport that will send it, rather than stringified here:
+    # httpx renders a bool as `true` where urlencoding one gives `True`, and
+    # normalising both sides is how a comparison stops seeing the difference.
+    sent = httpx.URL(client.base_url).join(args[1]).copy_merge_params(kwargs["params"])
+    ours = urlparse(str(sent))
+    ours_query = parse_qs(ours.query)
 
     published = urlparse(client.base_url + STATUS_ENDPOINT)
     published_query = {

@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 import requests
-from requests.exceptions import ConnectionError, ConnectTimeout, Timeout
+from requests.exceptions import ConnectionError, ConnectTimeout, ReadTimeout, Timeout
 
 from unstract.api_deployments.client import (
     _EXECUTE_SEND_ONLY,
@@ -104,7 +104,7 @@ def _requests_response(status_code=200, json_data=None, text=None):
     ("raised", "expected"),
     [
         (httpx.ConnectTimeout("connect timed out"), ConnectTimeout),
-        (httpx.ReadTimeout("read timed out"), Timeout),
+        (httpx.ReadTimeout("read timed out"), ReadTimeout),
         (httpx.WriteTimeout("write timed out"), Timeout),
         (httpx.PoolTimeout("pool timed out"), Timeout),
         (httpx.ConnectError("refused"), ConnectionError),
@@ -119,14 +119,17 @@ def test_transport_errors_are_translated(raised, expected):
 
     ``ConnectTimeout`` is the case that makes ordering load-bearing, and it is
     also both a ``ConnectionError`` and a ``Timeout`` — the plain ``Timeout``
-    that httpx's hierarchy implies would stop matching half the callers.
+    that httpx's hierarchy implies would stop matching half the callers. The
+    exact class matters too: a caller catching ``ReadTimeout`` sees nothing if
+    a broader ``Timeout`` is raised in its place.
     """
     client = _client()
     with patch.object(
         client._transport.get_httpx_client(), "request", side_effect=raised
     ):
-        with pytest.raises(expected):
+        with pytest.raises(expected) as caught:
             client._send("get", "/anything")
+    assert type(caught.value) is expected
 
 
 def test_a_connect_timeout_is_still_a_connection_error():

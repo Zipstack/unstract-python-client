@@ -19,7 +19,7 @@ import httpx
 # `requests` remains a dependency for its exception classes. Downstream code
 # catches ConnectionError and Timeout by name around these calls, and the httpx
 # equivalents are not subclasses, so they are translated at the transport seam.
-from requests.exceptions import ConnectionError, ConnectTimeout, Timeout
+from requests.exceptions import ConnectionError, ConnectTimeout, ReadTimeout, Timeout
 from tenacity import (
     RetryCallState,
     Retrying,
@@ -51,6 +51,8 @@ def _translate_transport_errors(fn, *args, **kwargs):
         # ConnectTimeout is both a ConnectionError and a Timeout; the plain
         # Timeout httpx implies would stop matching half the callers.
         raise ConnectTimeout(str(e)) from e
+    except httpx.ReadTimeout as e:
+        raise ReadTimeout(str(e)) from e
     except httpx.TimeoutException as e:
         raise Timeout(str(e)) from e
     except httpx.ConnectError as e:

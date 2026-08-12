@@ -20,7 +20,16 @@ import httpx
 # `requests` remains a dependency for its exception classes. Downstream code
 # catches ConnectionError and Timeout by name around these calls, and the httpx
 # equivalents are not subclasses, so they are translated at the transport seam.
-from requests.exceptions import ConnectionError, ConnectTimeout, ReadTimeout, Timeout
+from requests.exceptions import (
+    ConnectionError,
+    ConnectTimeout,
+    ContentDecodingError,
+    MissingSchema,
+    ProxyError,
+    ReadTimeout,
+    Timeout,
+    TooManyRedirects,
+)
 from tenacity import (
     RetryCallState,
     Retrying,
@@ -41,10 +50,11 @@ from unstract.api_deployments.utils import UnstractUtils
 def _translate_transport_errors(fn, *args, **kwargs):
     """Re-raise httpx transport failures as their ``requests`` equivalents.
 
-    Callers document and catch the ``requests`` classes. Ordering matters:
-    ``TimeoutException`` must be checked before ``ConnectError``, and
-    ``TransportError`` is the catch-all that keeps a novel transport failure from
-    escaping untranslated.
+    Callers document and catch the ``requests`` classes, and the retry policy
+    keys off them too, so the class chosen here decides whether a failure is
+    retried. Every branch is ordered before the base class it derives from, and
+    ``RequestError`` is the catch-all that keeps a novel failure from escaping
+    untranslated.
     """
     try:
         return fn(*args, **kwargs)
@@ -54,11 +64,25 @@ def _translate_transport_errors(fn, *args, **kwargs):
         raise ConnectTimeout(str(e)) from e
     except httpx.ReadTimeout as e:
         raise ReadTimeout(str(e)) from e
+    except (httpx.WriteTimeout, httpx.PoolTimeout) as e:
+        # Neither had a Timeout equivalent: a send that failed and a pool that
+        # could not hand out a connection both surfaced as ConnectionError.
+        raise ConnectionError(str(e)) from e
     except httpx.TimeoutException as e:
         raise Timeout(str(e)) from e
+    except httpx.UnsupportedProtocol as e:
+        # A URL rejected before any socket is opened. Deliberately not a
+        # ConnectionError: retrying a malformed URL cannot start working.
+        raise MissingSchema(str(e)) from e
+    except httpx.ProxyError as e:
+        raise ProxyError(str(e)) from e
     except httpx.ConnectError as e:
         raise ConnectionError(str(e)) from e
-    except httpx.TransportError as e:
+    except httpx.TooManyRedirects as e:
+        raise TooManyRedirects(str(e)) from e
+    except httpx.DecodingError as e:
+        raise ContentDecodingError(str(e)) from e
+    except httpx.RequestError as e:
         raise ConnectionError(str(e)) from e
 
 

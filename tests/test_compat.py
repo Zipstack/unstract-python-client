@@ -19,7 +19,17 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 import requests
-from requests.exceptions import ConnectionError, ConnectTimeout, ReadTimeout, Timeout
+from requests.exceptions import (
+    ConnectionError,
+    ConnectTimeout,
+    ContentDecodingError,
+    MissingSchema,
+    ProxyError,
+    ReadTimeout,
+    RequestException,
+    Timeout,
+    TooManyRedirects,
+)
 
 from unstract.api_deployments.client import (
     _EXECUTE_SEND_ONLY,
@@ -104,13 +114,18 @@ def _requests_response(status_code=200, json_data=None, text=None):
     [
         (httpx.ConnectTimeout("connect timed out"), ConnectTimeout),
         (httpx.ReadTimeout("read timed out"), ReadTimeout),
-        (httpx.WriteTimeout("write timed out"), Timeout),
-        (httpx.PoolTimeout("pool timed out"), Timeout),
+        # Neither had a Timeout equivalent: a send that failed and a pool that
+        # could not hand out a connection both surfaced as ConnectionError.
+        (httpx.WriteTimeout("write timed out"), ConnectionError),
+        (httpx.PoolTimeout("pool timed out"), ConnectionError),
         (httpx.ConnectError("refused"), ConnectionError),
         (httpx.ReadError("reset"), ConnectionError),
         (httpx.WriteError("broken pipe"), ConnectionError),
         (httpx.ProtocolError("bad framing"), ConnectionError),
-        (httpx.ProxyError("proxy exploded"), ConnectionError),
+        (httpx.ProxyError("proxy exploded"), ProxyError),
+        (httpx.UnsupportedProtocol("no scheme"), MissingSchema),
+        (httpx.TooManyRedirects("looping"), TooManyRedirects),
+        (httpx.DecodingError("bad gzip"), ContentDecodingError),
     ],
 )
 def test_transport_errors_are_translated(raised, expected):
@@ -129,6 +144,53 @@ def test_transport_errors_are_translated(raised, expected):
         with pytest.raises(expected) as caught:
             client._send("get", "/anything")
     assert type(caught.value) is expected
+
+
+def _httpx_request_errors():
+    """Every httpx request failure, discovered rather than listed.
+
+    A hand-written list is exactly as complete as it was the day it was
+    written; this one grows when httpx does.
+    """
+    found, stack = [], [httpx.RequestError]
+    while stack:
+        cls = stack.pop()
+        found.append(cls)
+        stack.extend(cls.__subclasses__())
+    return sorted(found, key=lambda cls: cls.__name__)
+
+
+@pytest.mark.parametrize("cls", _httpx_request_errors(), ids=lambda cls: cls.__name__)
+def test_no_httpx_failure_escapes_untranslated(cls):
+    """An httpx class reaching a caller is a class no caller catches."""
+    client = _client()
+    with patch.object(
+        client._transport.get_httpx_client(), "request", side_effect=cls("boom")
+    ):
+        with pytest.raises(RequestException):
+            client._send("get", "/anything")
+
+
+@pytest.mark.parametrize(
+    ("raised", "retried"),
+    [
+        (httpx.PoolTimeout("pool timed out"), True),
+        (httpx.ProxyError("proxy exploded"), True),
+        # Retrying these cannot start working: the URL stays malformed, the
+        # redirect chain stays a loop, the body stays undecodable.
+        (httpx.UnsupportedProtocol("no scheme"), False),
+        (httpx.TooManyRedirects("looping"), False),
+        (httpx.DecodingError("bad gzip"), False),
+    ],
+)
+def test_translation_decides_what_gets_retried(raised, retried):
+    client = _client(max_retries=2, initial_delay=0, max_delay=0, jitter=0)
+    with patch.object(
+        client._transport.get_httpx_client(), "request", side_effect=raised
+    ) as request:
+        with pytest.raises(RequestException):
+            client._request_with_retry("get", "/anything")
+    assert (request.call_count > 1) is retried
 
 
 def test_a_connect_timeout_is_still_a_connection_error():
@@ -512,6 +574,26 @@ def test_execute_url_matches_the_deployment_url(api_url):
 
     assert args[0].lower() == "post"
     assert args[1] == api_url == mock_requests.post.call_args[0][0]
+
+
+def test_request_headers_match_the_released_client():
+    """The headers a caller never sets are still on the wire.
+
+    ``requests`` sent its session defaults; httpx sends its own, and
+    ``Accept-Encoding`` in particular decides whether responses come back
+    compressed. Taken from ``requests`` rather than copied, so this compares
+    against what the released client would send today.
+    """
+    client = _client()
+    request = client._transport.get_httpx_client().build_request("POST", API_URL)
+    published = requests.utils.default_headers()
+
+    for name in ("Accept", "Accept-Encoding", "Connection"):
+        assert request.headers[name] == published[name]
+    assert request.headers["Authorization"] == "Bearer test-key"
+    # The one accepted difference: the transport names itself, and nothing on
+    # the wire branches on it.
+    assert request.headers["User-Agent"].startswith("python-httpx/")
 
 
 def test_deployment_route_rejects_an_unusable_url():

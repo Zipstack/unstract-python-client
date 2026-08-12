@@ -18,34 +18,32 @@ T = TypeVar("T", bound="ExecutionMessage")
 
 @_attrs_define
 class ExecutionMessage:
-    """
-    Attributes:
-        execution_status (str):
-        error (None | str | Unset):
-        execution_id (str | Unset):
-        result (list[FileResult] | None | Unset):
-        status_api (None | str | Unset):
-        workflow_id (str | Unset):
+    """The execution's identity and, once it has finished, its per-file
+    results.
+
+        Attributes:
+            error (str):
+            execution_id (str):
+            execution_status (str):
+            status_api (str):
+            result (list[FileResult] | None | Unset):
     """
 
+    error: str
+    execution_id: str
     execution_status: str
-    error: None | str | Unset = UNSET
-    execution_id: str | Unset = UNSET
+    status_api: str
     result: list[FileResult] | None | Unset = UNSET
-    status_api: None | str | Unset = UNSET
-    workflow_id: str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        execution_status = self.execution_status
-
-        error: None | str | Unset
-        if isinstance(self.error, Unset):
-            error = UNSET
-        else:
-            error = self.error
+        error = self.error
 
         execution_id = self.execution_id
+
+        execution_status = self.execution_status
+
+        status_api = self.status_api
 
         result: list[dict[str, Any]] | None | Unset
         if isinstance(self.result, Unset):
@@ -59,31 +57,18 @@ class ExecutionMessage:
         else:
             result = self.result
 
-        status_api: None | str | Unset
-        if isinstance(self.status_api, Unset):
-            status_api = UNSET
-        else:
-            status_api = self.status_api
-
-        workflow_id = self.workflow_id
-
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
             {
+                "error": error,
+                "execution_id": execution_id,
                 "execution_status": execution_status,
+                "status_api": status_api,
             }
         )
-        if error is not UNSET:
-            field_dict["error"] = error
-        if execution_id is not UNSET:
-            field_dict["execution_id"] = execution_id
         if result is not UNSET:
             field_dict["result"] = result
-        if status_api is not UNSET:
-            field_dict["status_api"] = status_api
-        if workflow_id is not UNSET:
-            field_dict["workflow_id"] = workflow_id
 
         return field_dict
 
@@ -92,18 +77,13 @@ class ExecutionMessage:
         from ..models.file_result import FileResult
 
         d = dict(src_dict)
+        error = d.pop("error")
+
+        execution_id = d.pop("execution_id")
+
         execution_status = d.pop("execution_status")
 
-        def _parse_error(data: object) -> None | str | Unset:
-            if data is None:
-                return data
-            if isinstance(data, Unset):
-                return data
-            return cast(None | str | Unset, data)
-
-        error = _parse_error(d.pop("error", UNSET))
-
-        execution_id = d.pop("execution_id", UNSET)
+        status_api = d.pop("status_api")
 
         def _parse_result(data: object) -> list[FileResult] | None | Unset:
             if data is None:
@@ -127,24 +107,12 @@ class ExecutionMessage:
 
         result = _parse_result(d.pop("result", UNSET))
 
-        def _parse_status_api(data: object) -> None | str | Unset:
-            if data is None:
-                return data
-            if isinstance(data, Unset):
-                return data
-            return cast(None | str | Unset, data)
-
-        status_api = _parse_status_api(d.pop("status_api", UNSET))
-
-        workflow_id = d.pop("workflow_id", UNSET)
-
         execution_message = cls(
-            execution_status=execution_status,
             error=error,
             execution_id=execution_id,
-            result=result,
+            execution_status=execution_status,
             status_api=status_api,
-            workflow_id=workflow_id,
+            result=result,
         )
 
         execution_message.additional_properties = d

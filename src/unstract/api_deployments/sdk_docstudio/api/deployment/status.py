@@ -54,6 +54,26 @@ def _parse_response(
 
         return response_200
 
+    if response.status_code == 400:
+        response_400 = ErrorResponse.from_dict(response.json())
+
+        return response_400
+
+    if response.status_code == 401:
+        response_401 = ErrorResponse.from_dict(response.json())
+
+        return response_401
+
+    if response.status_code == 403:
+        response_403 = ErrorResponse.from_dict(response.json())
+
+        return response_403
+
+    if response.status_code == 404:
+        response_404 = ErrorResponse.from_dict(response.json())
+
+        return response_404
+
     if response.status_code == 406:
         response_406 = ErrorResponse.from_dict(response.json())
 
@@ -63,6 +83,11 @@ def _parse_response(
         response_422 = StatusResponse.from_dict(response.json())
 
         return response_422
+
+    if response.status_code == 429:
+        response_429 = ErrorResponse.from_dict(response.json())
+
+        return response_429
 
     if response.status_code == 500:
         response_500 = ErrorResponse.from_dict(response.json())
@@ -96,7 +121,11 @@ def sync_detailed(
     include_metadata: bool | Unset = False,
     include_metrics: bool | Unset = False,
 ) -> Response[ErrorResponse | StatusResponse]:
-    """Poll the status of a previously started execution.
+    """Read the result of a previously started execution.
+
+    This read is one-shot: the first call that observes a completed execution acknowledges it and the
+    stored result is discarded, so every later call for that execution answers 406. Poll while the
+    execution is pending, and keep the payload of the call that returns it — it cannot be fetched again.
 
     Args:
         org_name (str):
@@ -140,7 +169,11 @@ def sync(
     include_metadata: bool | Unset = False,
     include_metrics: bool | Unset = False,
 ) -> ErrorResponse | StatusResponse | None:
-    """Poll the status of a previously started execution.
+    """Read the result of a previously started execution.
+
+    This read is one-shot: the first call that observes a completed execution acknowledges it and the
+    stored result is discarded, so every later call for that execution answers 406. Poll while the
+    execution is pending, and keep the payload of the call that returns it — it cannot be fetched again.
 
     Args:
         org_name (str):
@@ -179,7 +212,11 @@ async def asyncio_detailed(
     include_metadata: bool | Unset = False,
     include_metrics: bool | Unset = False,
 ) -> Response[ErrorResponse | StatusResponse]:
-    """Poll the status of a previously started execution.
+    """Read the result of a previously started execution.
+
+    This read is one-shot: the first call that observes a completed execution acknowledges it and the
+    stored result is discarded, so every later call for that execution answers 406. Poll while the
+    execution is pending, and keep the payload of the call that returns it — it cannot be fetched again.
 
     Args:
         org_name (str):
@@ -221,7 +258,11 @@ async def asyncio(
     include_metadata: bool | Unset = False,
     include_metrics: bool | Unset = False,
 ) -> ErrorResponse | StatusResponse | None:
-    """Poll the status of a previously started execution.
+    """Read the result of a previously started execution.
+
+    This read is one-shot: the first call that observes a completed execution acknowledges it and the
+    stored result is discarded, so every later call for that execution answers 406. Poll while the
+    execution is pending, and keep the payload of the call that returns it — it cannot be fetched again.
 
     Args:
         org_name (str):

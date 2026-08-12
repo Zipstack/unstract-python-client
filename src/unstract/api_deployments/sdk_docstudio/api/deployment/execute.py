@@ -46,10 +46,40 @@ def _parse_response(
 
         return response_200
 
+    if response.status_code == 400:
+        response_400 = ErrorResponse.from_dict(response.json())
+
+        return response_400
+
+    if response.status_code == 401:
+        response_401 = ErrorResponse.from_dict(response.json())
+
+        return response_401
+
+    if response.status_code == 403:
+        response_403 = ErrorResponse.from_dict(response.json())
+
+        return response_403
+
+    if response.status_code == 404:
+        response_404 = ErrorResponse.from_dict(response.json())
+
+        return response_404
+
+    if response.status_code == 409:
+        response_409 = ErrorResponse.from_dict(response.json())
+
+        return response_409
+
     if response.status_code == 422:
         response_422 = ExecuteResponse.from_dict(response.json())
 
         return response_422
+
+    if response.status_code == 429:
+        response_429 = ErrorResponse.from_dict(response.json())
+
+        return response_429
 
     if response.status_code == 500:
         response_500 = ErrorResponse.from_dict(response.json())
@@ -80,13 +110,21 @@ def sync_detailed(
     client: AuthenticatedClient,
     body: ExecuteRequest | Unset = UNSET,
 ) -> Response[ErrorResponse | ExecuteResponse]:
-    """Execute an API deployment against one or more files.
+    """Execute an API deployment against one or more documents.
+
+    Supply the documents either as `files` (multipart upload) or as `presigned_urls` (HTTPS S3 URLs), or
+    both — a request carrying neither is rejected, and the two together may not exceed 32 documents.
+
+    With the default `timeout` of -1 the call returns as soon as the execution is queued; read the
+    outcome from the status endpoint.
 
     Args:
         org_name (str):
         api_name (str):
-        body (ExecuteRequest | Unset): Subclasses the real serializer so every backend param
-            arrives free.
+        body (ExecuteRequest | Unset): The documents to run, and the options that shape the
+            result.
+
+            Supply `files`, `presigned_urls`, or both.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -116,13 +154,21 @@ def sync(
     client: AuthenticatedClient,
     body: ExecuteRequest | Unset = UNSET,
 ) -> ErrorResponse | ExecuteResponse | None:
-    """Execute an API deployment against one or more files.
+    """Execute an API deployment against one or more documents.
+
+    Supply the documents either as `files` (multipart upload) or as `presigned_urls` (HTTPS S3 URLs), or
+    both — a request carrying neither is rejected, and the two together may not exceed 32 documents.
+
+    With the default `timeout` of -1 the call returns as soon as the execution is queued; read the
+    outcome from the status endpoint.
 
     Args:
         org_name (str):
         api_name (str):
-        body (ExecuteRequest | Unset): Subclasses the real serializer so every backend param
-            arrives free.
+        body (ExecuteRequest | Unset): The documents to run, and the options that shape the
+            result.
+
+            Supply `files`, `presigned_urls`, or both.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -147,13 +193,21 @@ async def asyncio_detailed(
     client: AuthenticatedClient,
     body: ExecuteRequest | Unset = UNSET,
 ) -> Response[ErrorResponse | ExecuteResponse]:
-    """Execute an API deployment against one or more files.
+    """Execute an API deployment against one or more documents.
+
+    Supply the documents either as `files` (multipart upload) or as `presigned_urls` (HTTPS S3 URLs), or
+    both — a request carrying neither is rejected, and the two together may not exceed 32 documents.
+
+    With the default `timeout` of -1 the call returns as soon as the execution is queued; read the
+    outcome from the status endpoint.
 
     Args:
         org_name (str):
         api_name (str):
-        body (ExecuteRequest | Unset): Subclasses the real serializer so every backend param
-            arrives free.
+        body (ExecuteRequest | Unset): The documents to run, and the options that shape the
+            result.
+
+            Supply `files`, `presigned_urls`, or both.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -181,13 +235,21 @@ async def asyncio(
     client: AuthenticatedClient,
     body: ExecuteRequest | Unset = UNSET,
 ) -> ErrorResponse | ExecuteResponse | None:
-    """Execute an API deployment against one or more files.
+    """Execute an API deployment against one or more documents.
+
+    Supply the documents either as `files` (multipart upload) or as `presigned_urls` (HTTPS S3 URLs), or
+    both — a request carrying neither is rejected, and the two together may not exceed 32 documents.
+
+    With the default `timeout` of -1 the call returns as soon as the execution is queued; read the
+    outcome from the status endpoint.
 
     Args:
         org_name (str):
         api_name (str):
-        body (ExecuteRequest | Unset): Subclasses the real serializer so every backend param
-            arrives free.
+        body (ExecuteRequest | Unset): The documents to run, and the options that shape the
+            result.
+
+            Supply `files`, `presigned_urls`, or both.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

@@ -34,10 +34,9 @@ SPEC_PATH = Path(__file__).parents[1] / "specs" / "docstudio-oss.json"
 API_URL = "https://api.example.com/deployment/api/testorg/testapi/"
 STATUS_ENDPOINT = "/deployment/api/testorg/testapi/?execution_id=exec-123"
 
-# Operations the spec declares that the facade deliberately does not wrap. The
-# CLI has no use for them yet; listing them here keeps the coverage check honest
-# instead of silently passing on whatever happens to be implemented.
-UNWRAPPED_OPERATIONS = frozenset({"mcp_retrieve", "mcp_create"})
+#: Operations the facade wraps. The spec declares exactly these, and a new one
+#: has to be added here deliberately rather than arriving unnoticed.
+WRAPPED_OPERATIONS = frozenset({"execute", "status"})
 
 
 def _load_baseline():
@@ -712,8 +711,13 @@ def test_module_level_names_are_unchanged():
             assert hasattr(live, node.name), node.name
 
 
-def test_every_wrapped_operation_is_covered():
-    """A new spec operation shows up here as a failure, not as silence."""
+def test_every_declared_operation_is_wrapped():
+    """A new spec operation shows up here as a failure, not as silence.
+
+    Compared whole rather than after subtracting an exception list: an entry
+    excusing an operation the spec no longer declares keeps passing forever, and
+    nothing about a green run says the list is still describing anything.
+    """
     spec = json.loads(SPEC_PATH.read_text())
     declared = {
         operation["operationId"]
@@ -721,8 +725,7 @@ def test_every_wrapped_operation_is_covered():
         for method, operation in path.items()
         if method in {"get", "post", "put", "patch", "delete"}
     }
-    covered = {"execute", "status"}
-    assert declared - UNWRAPPED_OPERATIONS == covered
+    assert declared == WRAPPED_OPERATIONS
 
 
 def test_the_baseline_is_a_released_version():

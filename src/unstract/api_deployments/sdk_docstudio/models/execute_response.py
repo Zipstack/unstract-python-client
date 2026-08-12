@@ -18,7 +18,8 @@ T = TypeVar("T", bound="ExecuteResponse")
 class ExecuteResponse:
     """
     Attributes:
-        message (ExecutionMessage):
+        message (ExecutionMessage): The execution's identity and, once it has finished, its per-file
+            results.
     """
 
     message: ExecutionMessage

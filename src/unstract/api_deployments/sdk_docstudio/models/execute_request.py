@@ -16,21 +16,23 @@ T = TypeVar("T", bound="ExecuteRequest")
 
 @_attrs_define
 class ExecuteRequest:
-    """Subclasses the real serializer so every backend param arrives free.
+    """The documents to run, and the options that shape the result.
 
-    Attributes:
-        custom_data (Any | Unset):
-        files (list[File] | Unset):
-        hitl_packet_id (None | str | Unset):
-        hitl_queue_name (None | str | Unset):
-        include_extracted_text (bool | Unset):  Default: False.
-        include_metadata (bool | Unset):  Default: False.
-        include_metrics (bool | Unset):  Default: False.
-        llm_profile_id (None | str | Unset):
-        presigned_urls (list[str] | Unset):
-        tags (str | Unset): Comma-separated list of tag names (EX:'tag1,tag2-name,tag3_name') Default: ''.
-        timeout (int | Unset):  Default: -1.
-        use_file_history (bool | Unset):  Default: False.
+    Supply `files`, `presigned_urls`, or both.
+
+        Attributes:
+            custom_data (Any | Unset):
+            files (list[File] | Unset):
+            hitl_packet_id (None | str | Unset):
+            hitl_queue_name (None | str | Unset):
+            include_extracted_text (bool | Unset):  Default: False.
+            include_metadata (bool | Unset):  Default: False.
+            include_metrics (bool | Unset):  Default: False.
+            llm_profile_id (None | str | Unset):
+            presigned_urls (list[str] | Unset):
+            tags (str | Unset): Comma-separated list of tag names (EX:'tag1,tag2-name,tag3_name') Default: ''.
+            timeout (int | Unset):  Default: -1.
+            use_file_history (bool | Unset):  Default: False.
     """
 
     custom_data: Any | Unset = UNSET

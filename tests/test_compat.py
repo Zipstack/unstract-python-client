@@ -208,7 +208,9 @@ def test_translation_happens_inside_the_retried_call(sample_file):
 
 @pytest.mark.parametrize("api_timeout", [-1, 0, 1, 300])
 def test_api_timeout_never_configures_the_transport(api_timeout):
-    """``api_timeout`` selects a backend execution mode. ``-1``/``0`` mean async;
+    """``api_timeout`` selects a backend execution mode.
+
+    ``-1``/``0`` mean async;
     handing either to the transport fails inside the connection layer.
     """
     client = _client(api_timeout=api_timeout)
@@ -230,17 +232,22 @@ def test_api_timeout_never_reaches_the_transport_call(sample_file, api_timeout):
 # --------------------------------------------------------------------------
 
 
-def _captured_execute_kwargs(client, file_path):
+def _captured_execute_kwargs(client, file_path, **request_params):
     with patch.object(APIDeploymentsClient, "_send") as mock_send:
         mock_send.return_value = _httpx_response(200, {"message": {}})
-        client.structure_file([file_path])
+        client.structure_file([file_path], **request_params)
     return mock_send.call_args
+
+
+def _execute_parts(client, file_path, **request_params):
+    _, kwargs = _captured_execute_kwargs(client, file_path, **request_params)
+    return {name: value for name, value in kwargs["files"]}
 
 
 def test_execute_sends_only_the_fields_the_client_sets(sample_file):
     """A spec default written into the request pins a value the server would
-    otherwise choose, and the two diverge the moment the server's default moves.
-    """
+    otherwise choose, and the two diverge the moment the server's default
+    moves."""
     _, kwargs = _captured_execute_kwargs(_client(api_timeout=300), sample_file)
     assert {name for name, _ in kwargs["files"]} == {
         "files",
@@ -266,12 +273,106 @@ def test_execute_multipart_values_match_the_released_client(sample_file):
     assert parts["files"][2] == "application/octet-stream"
 
 
+# --------------------------------------------------------------------------
+# Request parameters, added as keyword-only arguments
+# --------------------------------------------------------------------------
+
+
+def _request_param_names():
+    return [
+        name
+        for name, p in inspect.signature(
+            APIDeploymentsClient.structure_file
+        ).parameters.items()
+        if p.kind is p.KEYWORD_ONLY
+    ]
+
+
+def test_request_parameters_are_named_as_the_spec_names_them():
+    """A rename here would need a translation table in every caller."""
+    spec = json.loads(SPEC_PATH.read_text())
+    declared = set(spec["components"]["schemas"]["ExecuteRequest"]["properties"])
+    # ``files`` is built from ``file_paths``, not passed through.
+    assert set(_request_param_names()) == declared - {"files"}
+
+
+def test_request_parameters_are_keyword_only(sample_file):
+    with pytest.raises(TypeError):
+        _client().structure_file([sample_file], 300)
+
+
+def test_an_unset_parameter_is_not_sent(sample_file):
+    """Sending a default pins a value the server would otherwise choose."""
+    parts = _execute_parts(_client(api_timeout=300), sample_file)
+    assert set(parts) == {"files", "include_metadata", "timeout"}
+
+
+def test_a_requested_parameter_is_sent(sample_file):
+    parts = _execute_parts(
+        _client(api_timeout=300),
+        sample_file,
+        tags="a,b",
+        llm_profile_id="profile-1",
+        use_file_history=True,
+    )
+    assert parts["tags"][1] == b"a,b"
+    assert parts["llm_profile_id"][1] == b"profile-1"
+    assert parts["use_file_history"][1] == b"True"
+
+
+@pytest.mark.parametrize(
+    ("param", "value", "expected"),
+    [
+        ("timeout", 0, b"0"),
+        ("include_metrics", False, b"False"),
+        ("include_extracted_text", False, b"False"),
+        ("tags", "", b""),
+    ],
+)
+def test_a_falsy_parameter_is_still_sent(sample_file, param, value, expected):
+    """``False``/``0``/``""`` are choices, not absences; a truthiness filter
+    eats them and silently hands the decision back to the server."""
+    parts = _execute_parts(_client(api_timeout=300), sample_file, **{param: value})
+    assert parts[param][1] == expected
+
+
+def test_a_requested_parameter_overrides_the_constructor(sample_file):
+    parts = _execute_parts(
+        _client(api_timeout=300, include_metadata=False),
+        sample_file,
+        timeout=-1,
+        include_metadata=True,
+    )
+    assert parts["timeout"][1] == b"-1"
+    assert parts["include_metadata"][1] == b"True"
+
+
+def test_a_requested_timeout_selects_the_execution_mode(sample_file):
+    """``timeout`` is an execution mode: ``0`` queues, so a 5xx is safe to
+    retry.
+
+    Passing it per request has to move that decision with it.
+    """
+    with patch.object(APIDeploymentsClient, "_request_with_retry") as retried:
+        with patch.object(APIDeploymentsClient, "_send") as sent:
+            retried.return_value = sent.return_value = _httpx_response(
+                200, {"message": {}}
+            )
+            _client(api_timeout=300).structure_file([sample_file], timeout=0)
+            assert retried.called and not sent.called
+
+            retried.reset_mock()
+            _client(api_timeout=0).structure_file([sample_file], timeout=300)
+            assert sent.called and not retried.called
+
+
 def test_multipart_boundary_is_random_and_matches_the_body(sample_file):
     """The generated builder pins ``boundary=+++`` in the header. A PDF
     containing those bytes would corrupt the encoding, so the header is dropped
     and the transport picks the boundary — as the released client did.
 
-    Encoding happens inside the send, while the file handles are still open.
+    Encoding happens inside the send, while the file handles are still
+    open.
     """
     encoded = []
 
@@ -307,8 +408,9 @@ def test_status_sends_only_the_fields_the_client_sets():
 
 def test_status_url_matches_the_released_client():
     """The status URL is rebuilt from the spec route plus the execution id
-    instead of concatenating the server-supplied path. Same request either way,
-    which is what this pins.
+    instead of concatenating the server-supplied path.
+
+    Same request either way, which is what this pins.
     """
     client = _client(include_metadata=True)
     with patch.object(APIDeploymentsClient, "_send") as mock_send:
@@ -425,7 +527,8 @@ def test_structure_file_missing_file_still_raises(sample_file):
 
 
 def test_structure_file_closes_its_handles(sample_file):
-    """The released client leaked these; closing them is invisible to callers."""
+    """The released client leaked these; closing them is invisible to
+    callers."""
     opened = []
     real_open = open
 
@@ -499,8 +602,9 @@ def _baseline_class_node():
 def _baseline_init_params():
     """Constructor parameters and defaults, read out of the baseline source.
 
-    Parsed rather than imported so the comparison is against the released text,
-    not against whatever a shared import happened to bind.
+    Parsed rather than imported so the comparison is against the
+    released text, not against whatever a shared import happened to
+    bind.
     """
     for node in _baseline_class_node().body:
         if isinstance(node, ast.FunctionDef) and node.name == "__init__":
@@ -534,8 +638,12 @@ def test_public_methods_are_unchanged():
     for name, node in baseline_methods.items():
         live = getattr(APIDeploymentsClient, name, None)
         assert live is not None, f"{name} disappeared from the client"
+        # Keyword-only parameters are excluded: they cannot be reached by any
+        # existing call, so adding one leaves every released call shape intact.
         live_args = [
-            p for p in inspect.signature(live).parameters if p not in ("self", "cls")
+            arg
+            for arg, p in inspect.signature(live).parameters.items()
+            if arg not in ("self", "cls") and p.kind is not p.KEYWORD_ONLY
         ]
         assert live_args == [a.arg for a in node.args.args[1:]], name
 

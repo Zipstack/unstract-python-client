@@ -11,6 +11,7 @@ import logging
 import ntpath
 import os
 import time
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import attrs
@@ -33,7 +34,7 @@ from tenacity.wait import wait_base
 from unstract.api_deployments.sdk_docstudio import AuthenticatedClient
 from unstract.api_deployments.sdk_docstudio.api.deployment import execute, status
 from unstract.api_deployments.sdk_docstudio.models import ExecuteRequest
-from unstract.api_deployments.sdk_docstudio.types import UNSET, File
+from unstract.api_deployments.sdk_docstudio.types import UNSET, File, Unset
 from unstract.api_deployments.utils import UnstractUtils
 
 
@@ -238,7 +239,8 @@ class APIDeploymentsClient:
 
     @property
     def _deployment_route(self) -> tuple[str, str]:
-        """Organisation and API name, from the deployment URL's last two segments."""
+        """Organisation and API name, from the deployment URL's last two
+        segments."""
         segments = urlparse(self.api_url).path.strip("/").split("/")
         if len(segments) < 2:
             raise APIDeploymentsClientException(
@@ -249,8 +251,9 @@ class APIDeploymentsClient:
     def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
         """Issue one request, translating transport failures on the way out.
 
-        Translation happens here rather than around the retry loop, so the retry
-        policy still sees the exception types it is configured to retry.
+        Translation happens here rather than around the retry loop, so
+        the retry policy still sees the exception types it is configured
+        to retry.
         """
         return _translate_transport_errors(
             self._transport.get_httpx_client().request, method, url, **kwargs
@@ -369,17 +372,69 @@ class APIDeploymentsClient:
 
         return retrier(self._send, method, url, **kwargs)
 
-    def structure_file(self, file_paths: list[str]) -> dict:
+    def structure_file(
+        self,
+        file_paths: list[str],
+        *,
+        timeout: int | Unset = UNSET,
+        include_metadata: bool | Unset = UNSET,
+        include_metrics: bool | Unset = UNSET,
+        include_extracted_text: bool | Unset = UNSET,
+        use_file_history: bool | Unset = UNSET,
+        tags: str | Unset = UNSET,
+        llm_profile_id: str | None | Unset = UNSET,
+        hitl_queue_name: str | None | Unset = UNSET,
+        hitl_packet_id: str | None | Unset = UNSET,
+        presigned_urls: list[str] | Unset = UNSET,
+        custom_data: Any | Unset = UNSET,
+    ) -> dict:
         """Invokes the API deployed on the Unstract platform.
+
+        The keyword arguments are the request parameters the deployment accepts,
+        named as the API names them. One left unset is not sent at all, so the
+        server picks its own default; ``timeout`` and ``include_metadata`` fall
+        back to the values given at construction.
 
         Args:
             file_paths (list[str]): The file path to the file to be uploaded.
+            timeout (int): Execution mode — ``0`` or below runs asynchronously.
+            include_metadata (bool): Include metadata in the result.
+            include_metrics (bool): Include metrics in the result.
+            include_extracted_text (bool): Include the extracted text.
+            use_file_history (bool): Reuse a previous result for the same file.
+            tags (str): Comma-separated tag names.
+            llm_profile_id (str): LLM profile to override the deployment's.
+            hitl_queue_name (str): Human-in-the-loop queue to route the file to.
+            hitl_packet_id (str): Human-in-the-loop packet to attach the file to.
+            presigned_urls (list[str]): URLs to fetch the inputs from.
+            custom_data (Any): Arbitrary data echoed back with the result.
 
         Returns:
             dict: The response from the API.
         """
         self.logger.debug("Invoking API: " + self.api_url)
         self.logger.debug("File paths: " + str(file_paths))
+
+        requested = {
+            "timeout": timeout,
+            "include_metadata": include_metadata,
+            "include_metrics": include_metrics,
+            "include_extracted_text": include_extracted_text,
+            "use_file_history": use_file_history,
+            "tags": tags,
+            "llm_profile_id": llm_profile_id,
+            "hitl_queue_name": hitl_queue_name,
+            "hitl_packet_id": hitl_packet_id,
+            "presigned_urls": presigned_urls,
+            "custom_data": custom_data,
+        }
+        requested = {k: v for k, v in requested.items() if not isinstance(v, Unset)}
+        params = {
+            "timeout": self.api_timeout,
+            "include_metadata": self.include_metadata,
+            **requested,
+        }
+        send_only = _EXECUTE_SEND_ONLY | requested.keys()
 
         handles = []
         try:
@@ -391,8 +446,6 @@ class APIDeploymentsClient:
             raise APIDeploymentsClientException("File not found: " + str(e))
 
         body = ExecuteRequest(
-            timeout=self.api_timeout,
-            include_metadata=self.include_metadata,
             files=[
                 File(
                     payload=handle,
@@ -401,13 +454,14 @@ class APIDeploymentsClient:
                 )
                 for file_path, handle in zip(file_paths, handles)
             ],
+            **params,
         )
         # Only the fields this client sets are sent. Every other field carries the
         # spec's declared default, and sending a default is not the same as
         # omitting it: it pins a value the server would otherwise choose, and the
         # two diverge the moment the server's own default changes.
         for field in attrs.fields(ExecuteRequest):
-            if field.name not in _EXECUTE_SEND_ONLY:
+            if field.name not in send_only:
                 setattr(body, field.name, UNSET)
 
         org_name, api_name = self._deployment_route
@@ -420,7 +474,7 @@ class APIDeploymentsClient:
         url = request_kwargs.pop("url")
 
         try:
-            if self.api_timeout == 0:
+            if params["timeout"] == 0:
                 # Async mode: server returns immediately after queuing.
                 # A 5xx means queuing failed — safe to retry.
                 response = self._request_with_retry(method, url, **request_kwargs)

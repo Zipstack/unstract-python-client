@@ -12,7 +12,7 @@ import ntpath
 import os
 import time
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import attrs
 import httpx
@@ -104,6 +104,20 @@ def _query_value(url: str, key: str) -> str:
             "carries it; pass that endpoint unmodified."
         )
     return value
+
+
+def _forwarded_query(url: str) -> dict[str, str]:
+    """Everything else the service put on the status endpoint.
+
+    A region hint, a signature, a cursor: the endpoint is the service's
+    instruction for reaching this execution, and dropping part of it polls
+    somewhere the execution is not.
+    """
+    return {
+        key: values[-1]
+        for key, values in parse_qs(urlparse(url).query, keep_blank_values=True).items()
+        if key != "execution_id"
+    }
 
 
 class APIDeploymentsClientException(Exception):
@@ -299,19 +313,24 @@ class APIDeploymentsClient:
             )
         return segments[-2], segments[-1]
 
-    def _resolve(self, path: str) -> str:
-        """Absolute URL for a spec-relative path, under the deployment's own prefix.
+    def _status_url(self, endpoint: str, path: str) -> str:
+        """Absolute URL to poll, under the deployment's own path prefix.
 
         ``base_url`` is scheme and host only, so a deployment served under a path
         prefix would execute -- the execute call sends the caller's URL verbatim
-        -- and then never poll. The prefix is whatever precedes the route inside
-        the deployment URL; when the two do not line up, nothing is prepended.
+        -- and then never poll. The prefix is whatever precedes the spec route
+        inside the deployment URL. Where the two do not line up there is no
+        prefix to derive, and the endpoint the service returned is used as it
+        came: a guessed path polls nothing, and the execution behind it has
+        already been paid for.
         """
         route = path.rstrip("/")
         prefix = urlparse(self.api_url).path.rstrip("/")
-        if not route or not prefix.endswith(route):
-            return self.base_url + path
-        return self.base_url + prefix[: -len(route)] + path
+        if route and prefix.endswith(route):
+            return self.base_url + prefix[: -len(route)] + path
+        # Joined rather than concatenated: the query travels as params, and an
+        # absolute endpoint has to stay the URL it already is.
+        return urljoin(self.base_url, urlparse(endpoint)._replace(query="").geturl())
 
     def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
         """Issue one request, translating transport failures on the way out.
@@ -682,13 +701,16 @@ class APIDeploymentsClient:
         # which is what the released client sent. The service reads either, but
         # traffic diffed against the previous release should show no change.
         request_kwargs["params"] = {
-            k: str(v) if isinstance(v, bool) else v
-            for k, v in request_kwargs["params"].items()
-            if k in send_only
+            **_forwarded_query(status_check_api_endpoint),
+            **{
+                k: str(v) if isinstance(v, bool) else v
+                for k, v in request_kwargs["params"].items()
+                if k in send_only
+            },
         }
         response = self._request_with_retry(
             request_kwargs.pop("method"),
-            self._resolve(request_kwargs.pop("url")),
+            self._status_url(status_check_api_endpoint, request_kwargs.pop("url")),
             **request_kwargs,
         )
         self.logger.debug(response.status_code)

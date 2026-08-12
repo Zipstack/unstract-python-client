@@ -152,6 +152,31 @@ def test_transport_errors_are_translated(raised, expected):
     assert type(caught.value) is expected
 
 
+@pytest.mark.parametrize(
+    ("api_url", "expected"),
+    [
+        ("::::", APIDeploymentsClientException),
+        ("/deployment/api/testorg/testapi/", MissingSchema),
+        # Parity: the released client raised this one too.
+        ("http://[bad", ValueError),
+    ],
+)
+def test_a_malformed_deployment_url_raises_the_class_this_client_chose(
+    api_url, expected
+):
+    """A deliberate divergence, pinned here so it stays deliberate.
+
+    The released client answered the first two with ``InvalidSchema``, which said
+    nothing about which URL was wrong. This is a configuration typo that never
+    reaches the wire, so the clearer class is worth the difference -- but a
+    caller wrapping construction in ``except RequestException`` no longer catches
+    the first, which is the part that has to be visible.
+    """
+    with pytest.raises(expected):
+        client = _client(api_url=api_url)
+        client.check_execution_status(STATUS_ENDPOINT)
+
+
 def _httpx_request_errors():
     """Every httpx request failure, discovered rather than listed.
 
@@ -463,11 +488,11 @@ def test_multipart_boundary_is_random_and_matches_the_body(sample_file):
     assert boundaries[0] != boundaries[1]
 
 
-def _captured_status_params(client=None, **request_params):
+def _captured_status_params(client=None, endpoint=STATUS_ENDPOINT, **request_params):
     client = client or _client()
     with patch.object(APIDeploymentsClient, "_send") as mock_send:
         mock_send.return_value = _httpx_response(200, {"status": "COMPLETED"})
-        client.check_execution_status(STATUS_ENDPOINT, **request_params)
+        client.check_execution_status(endpoint, **request_params)
     return mock_send.call_args[1]["params"]
 
 
@@ -491,6 +516,31 @@ def test_status_is_polled_under_the_deployment_urls_own_prefix(api_url, expected
         mock_send.return_value = _httpx_response(200, {"status": "COMPLETED"})
         _client(api_url=api_url).check_execution_status(STATUS_ENDPOINT)
     assert mock_send.call_args[0][1] == expected
+
+
+def test_the_status_endpoints_own_query_parameters_are_forwarded():
+    """The endpoint is the service's instruction for reaching this execution.
+
+    A region hint or a signature dropped from it polls somewhere the execution
+    is not, and the execution has already been paid for.
+    """
+    params = _captured_status_params(
+        client=_client(),
+        endpoint=STATUS_ENDPOINT + "&region=eu&sig=abc123",
+    )
+    assert params["region"] == "eu"
+    assert params["sig"] == "abc123"
+    assert params["execution_id"] == "exec-123"
+
+
+def test_a_deployment_url_without_the_spec_route_polls_the_endpoint_as_returned():
+    """No prefix can be derived from a rewritten URL, and a guessed path polls
+    nothing."""
+    client = _client(api_url="https://gw.example.com/v1/testorg/testapi/")
+    with patch.object(APIDeploymentsClient, "_send") as mock_send:
+        mock_send.return_value = _httpx_response(200, {"status": "COMPLETED"})
+        client.check_execution_status("/v1/testorg/testapi/?execution_id=exec-123")
+    assert mock_send.call_args[0][1] == "https://gw.example.com/v1/testorg/testapi/"
 
 
 def test_status_request_parameters_are_named_as_the_spec_names_them():

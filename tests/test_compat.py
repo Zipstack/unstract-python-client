@@ -29,7 +29,7 @@ from unstract.api_deployments.client import (
 
 BASELINE_VERSION = "1.5.3"
 BASELINE_PATH = Path(__file__).parent / "baseline" / "client_1_5_3.py"
-SPEC_PATH = Path(__file__).parents[1] / "specs" / "docstudio.json"
+SPEC_PATH = Path(__file__).parents[1] / "specs" / "docstudio-oss.json"
 
 API_URL = "https://api.example.com/deployment/api/testorg/testapi/"
 STATUS_ENDPOINT = "/deployment/api/testorg/testapi/?execution_id=exec-123"

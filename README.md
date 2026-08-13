@@ -161,6 +161,26 @@ types the target lacks (listed in the end-of-run report).
 - Run the source and target on the same (or a newer-target) Unstract build.
 - Use `unstract-client >= 1.4.0`, the first release that ships the clone command.
 
+## Behaviour that differs from earlier releases
+
+Deliberate, and listed here so a difference is not rediscovered as a bug:
+
+- **The status poll is resolved under the deployment URL's own path prefix.**
+  Earlier releases concatenated the base URL and the endpoint the service
+  returned, which never reached a deployment served under an ingress or reverse
+  proxy path. Where no prefix can be derived from the deployment URL, the
+  endpoint the service returned is used as it came.
+- **An absolute `status_check_api_endpoint` now resolves.** Concatenation
+  produced `https://hosthttps://host/...`, which reached nothing at all; it is
+  joined instead.
+- **Query parameters this client sets win a collision** with the ones on the
+  returned endpoint. Everything else on that endpoint is forwarded unchanged.
+- **A malformed `api_url` raises this client's own exception classes** —
+  `APIDeploymentsClientException` for a URL with no host, `MissingSchema` for one
+  with no scheme — where earlier releases raised `InvalidSchema` for both. Code
+  catching `requests.exceptions.RequestException` around client construction no
+  longer catches the first of those.
+
 ## Questions and Feedback
 
 On Slack, [join great conversations](https://join-slack.unstract.com/) around LLMs, their ecosystem and leveraging them to automate the previously unautomatable!

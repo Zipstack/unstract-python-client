@@ -172,9 +172,12 @@ def test_a_malformed_deployment_url_raises_the_class_this_client_chose(
     caller wrapping construction in ``except RequestException`` no longer catches
     the first, which is the part that has to be visible.
     """
-    with pytest.raises(expected):
+    with pytest.raises(expected) as caught:
         client = _client(api_url=api_url)
         client.check_execution_status(STATUS_ENDPOINT)
+    # MissingSchema is itself a ValueError, so the parity row can only tell the
+    # two apart by the exact class.
+    assert type(caught.value) is expected
 
 
 def _httpx_request_errors():

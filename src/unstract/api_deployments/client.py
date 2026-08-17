@@ -320,17 +320,23 @@ class APIDeploymentsClient:
         prefix would execute -- the execute call sends the caller's URL verbatim
         -- and then never poll. The prefix is whatever precedes the spec route
         inside the deployment URL. Where the two do not line up there is no
-        prefix to derive, and the endpoint the service returned is used as it
-        came: a guessed path polls nothing, and the execution behind it has
-        already been paid for.
+        prefix to derive, and the path the service returned is used as it came:
+        a guessed path polls nothing, and the execution behind it has already
+        been paid for.
+
+        Only the path is taken. A scheme and host in the reply would otherwise
+        decide where the deployment key is sent, and the reply is not the thing
+        that gets to choose that.
         """
         route = path.rstrip("/")
         prefix = urlparse(self.api_url).path.rstrip("/")
         if route and prefix.endswith(route):
             return self.base_url + prefix[: -len(route)] + path
-        # Joined rather than concatenated: the query travels as params, and an
-        # absolute endpoint has to stay the URL it already is.
-        return urljoin(self.base_url, urlparse(endpoint)._replace(query="").geturl())
+        # Joined rather than concatenated: the query travels as params.
+        return urljoin(
+            self.base_url,
+            urlparse(endpoint)._replace(scheme="", netloc="", query="").geturl(),
+        )
 
     def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
         """Issue one request, translating transport failures on the way out.
@@ -338,7 +344,15 @@ class APIDeploymentsClient:
         Translation happens here rather than around the retry loop, so
         the retry policy still sees the exception types it is configured
         to retry.
+
+        The credential is read per request rather than captured with the
+        transport, so assigning ``api_key`` takes effect on the next call the
+        way it did when every call built its own header.
         """
+        kwargs["headers"] = {
+            **(kwargs.get("headers") or {}),
+            "Authorization": f"Bearer {self.api_key}",
+        }
         return _translate_transport_errors(
             self._transport.get_httpx_client().request, method, url, **kwargs
         )

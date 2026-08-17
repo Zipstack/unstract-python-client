@@ -645,6 +645,47 @@ def test_the_status_endpoint_is_read_not_concatenated(endpoint):
     assert kwargs["params"]["execution_id"] == "exec-123"
 
 
+def test_a_status_endpoint_on_another_host_is_not_polled():
+    """The reply names the path to poll. It does not get to name the host the
+    deployment key is sent to.
+
+    The deployment URL here carries a prefix the spec route cannot account for,
+    which is the branch that reads the endpoint rather than rebuilding it.
+    """
+    client = _client(api_url="https://api.example.com/other/testorg/testapi/")
+    with patch.object(APIDeploymentsClient, "_send") as mock_send:
+        mock_send.return_value = _httpx_response(200, {"status": "COMPLETED"})
+        client.check_execution_status(
+            "https://attacker.example/deployment/api/testorg/testapi/"
+            "?execution_id=exec-123"
+        )
+    args, _ = mock_send.call_args
+    sent = httpx.URL(client.base_url).join(args[1])
+
+    assert sent.host == "api.example.com"
+    assert sent.path == "/deployment/api/testorg/testapi/"
+
+
+def test_the_key_is_read_at_call_time():
+    """A rotated key reaches the next request.
+
+    The released client built its header on every call, so assigning ``api_key``
+    took effect immediately; a transport that captured it once would answer with
+    the old one until the client was rebuilt.
+    """
+    client = _client()
+    with patch.object(client._transport.get_httpx_client(), "request") as request:
+        request.return_value = _httpx_response(200, {})
+        client._send("GET", API_URL)
+        before = request.call_args.kwargs["headers"]["Authorization"]
+        client.api_key = "rotated-key"
+        client._send("GET", API_URL)
+        after = request.call_args.kwargs["headers"]["Authorization"]
+
+    assert before == "Bearer test-key"
+    assert after == "Bearer rotated-key"
+
+
 @pytest.mark.parametrize(
     "api_url",
     [

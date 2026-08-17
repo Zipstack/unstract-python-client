@@ -645,7 +645,20 @@ def test_the_status_endpoint_is_read_not_concatenated(endpoint):
     assert kwargs["params"]["execution_id"] == "exec-123"
 
 
-def test_a_status_endpoint_on_another_host_is_not_polled():
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://attacker.example/deployment/api/testorg/testapi/",
+        # A host can be spelled without a scheme, and a path beginning `//` is
+        # read as one by anything that resolves a reference.
+        "//attacker.example/deployment/api/testorg/testapi/",
+        "///attacker.example/deployment/api/testorg/testapi/",
+        "////attacker.example/deployment/api/testorg/testapi/",
+        "https:////attacker.example/deployment/api/testorg/testapi/",
+        "https://api.example.com//attacker.example/deployment/api/testorg/testapi/",
+    ],
+)
+def test_a_status_endpoint_naming_another_host_is_not_polled(endpoint):
     """The reply names the path to poll. It does not get to name the host the
     deployment key is sent to.
 
@@ -655,15 +668,11 @@ def test_a_status_endpoint_on_another_host_is_not_polled():
     client = _client(api_url="https://api.example.com/other/testorg/testapi/")
     with patch.object(APIDeploymentsClient, "_send") as mock_send:
         mock_send.return_value = _httpx_response(200, {"status": "COMPLETED"})
-        client.check_execution_status(
-            "https://attacker.example/deployment/api/testorg/testapi/"
-            "?execution_id=exec-123"
-        )
+        client.check_execution_status(f"{endpoint}?execution_id=exec-123")
     args, _ = mock_send.call_args
     sent = httpx.URL(client.base_url).join(args[1])
 
     assert sent.host == "api.example.com"
-    assert sent.path == "/deployment/api/testorg/testapi/"
 
 
 def test_the_key_is_read_at_call_time():

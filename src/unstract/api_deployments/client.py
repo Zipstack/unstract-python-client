@@ -7,9 +7,11 @@ Classes:
         APIDeploymentsClient class.
 """
 
+import json
 import logging
 import ntpath
 import os
+import threading
 import time
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -17,13 +19,15 @@ from urllib.parse import parse_qs, urljoin, urlparse
 import attrs
 import httpx
 
-# `requests` remains a dependency for its exception classes. Downstream code
-# catches ConnectionError and Timeout by name around these calls, and the httpx
-# equivalents are not subclasses, so they are translated at the transport seam.
+# `requests` is still the transport for the `unstract.clone` subpackage, and it
+# supplies the exception classes callers catch by name around these calls. The
+# httpx equivalents are not subclasses of those, so they are translated at the
+# transport seam.
 from requests.exceptions import (
     ConnectionError,
     ConnectTimeout,
     ContentDecodingError,
+    InvalidHeader,
     InvalidURL,
     MissingSchema,
     ProxyError,
@@ -55,9 +59,11 @@ def _translate_transport_errors(fn, *args, **kwargs):
     keys off them too, so the class chosen here decides whether a failure is
     retried. Every branch is ordered before the base class it derives from.
     ``RequestError`` is the catch-all for the transport subtree, which is where
-    a novel failure appears. httpx puts three families outside it: ``InvalidURL``,
-    translated here because ``requests`` raised its own, and ``StreamError`` and
-    ``CookieConflict``, which propagate as themselves.
+    a novel failure appears. Failures no retry can fix are pulled out above it:
+    ``UnsupportedProtocol`` and ``LocalProtocolError``. httpx puts three families
+    outside the subtree: ``InvalidURL``, translated here because ``requests``
+    raised its own, and ``StreamError`` and ``CookieConflict``, which propagate
+    as themselves.
     """
     try:
         return fn(*args, **kwargs)
@@ -87,6 +93,11 @@ def _translate_transport_errors(fn, *args, **kwargs):
         raise ContentDecodingError(str(e)) from e
     except httpx.InvalidURL as e:
         raise InvalidURL(str(e)) from e
+    except httpx.LocalProtocolError as e:
+        # The request cannot be written as composed -- an api_key carrying a
+        # newline is the everyday cause. Deliberately not a ConnectionError:
+        # re-sending the identical request cannot start working.
+        raise InvalidHeader(str(e)) from e
     except httpx.RequestError as e:
         raise ConnectionError(str(e)) from e
 
@@ -97,11 +108,14 @@ def _query_value(url: str, key: str) -> str:
     Empty is not a usable value here: it polls for an execution the service
     cannot identify and reports whatever it makes of a blank id.
     """
-    value = parse_qs(urlparse(url).query).get(key, [""])[0]
+    parsed = urlparse(url)
+    value = parse_qs(parsed.query).get(key, [""])[0]
     if not value:
+        # Only the path is reported: the query is the service's to shape, and
+        # the documented usage prints this exception straight to a log.
         raise APIDeploymentsClientException(
-            f"No {key} in {url!r}. The status endpoint the service returned "
-            "carries it; pass that endpoint unmodified."
+            f"No {key} in the query of {parsed.path!r}. The status endpoint the "
+            "service returned carries it; pass that endpoint unmodified."
         )
     return value
 
@@ -109,15 +123,45 @@ def _query_value(url: str, key: str) -> str:
 def _forwarded_query(url: str) -> dict[str, str]:
     """Everything else the service put on the status endpoint.
 
-    A region hint, a signature, a cursor: the endpoint is the service's
-    instruction for reaching this execution, and dropping part of it polls
-    somewhere the execution is not.
+    Today it sends only the execution id, but the endpoint is the service's
+    instruction for reaching this execution: dropping a parameter it decided to
+    add -- a region hint, a cursor -- polls somewhere the execution is not.
     """
     return {
         key: values[-1]
         for key, values in parse_qs(urlparse(url).query, keep_blank_values=True).items()
         if key != "execution_id"
     }
+
+
+#: How much of an unparseable error body is worth reporting to a caller.
+_ERROR_TEXT_LIMIT = 500
+
+
+def _error_text(body: Any, response) -> str:
+    """The reason a non-2xx carries, in whichever shape the service used.
+
+    Statuses raised through the API's exception handler answer with
+    ``{"type", "errors": [{"code", "detail", "attr"}]}``; the few built by hand
+    answer with ``{"status", "message"}``. Neither is the success envelope the
+    result fields are read out of, so without this the server's reason is
+    dropped and the caller sees an empty error next to a bare status code.
+    """
+    if isinstance(body, dict):
+        errors = body.get("errors")
+        if isinstance(errors, list):
+            details = [
+                str(item["detail"])
+                for item in errors
+                if isinstance(item, dict) and item.get("detail")
+            ]
+            if details:
+                return "; ".join(details)
+        for key in ("message", "detail", "error"):
+            value = body.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return (response.text or "").strip()[:_ERROR_TEXT_LIMIT]
 
 
 class APIDeploymentsClientException(Exception):
@@ -168,10 +212,12 @@ class _WaitRetryAfterOrExponentialJitter(wait_base):
         return self._exp_jitter(retry_state)
 
 
-#: Request fields this client sets itself. Anything outside these sets is reset
-#: to UNSET (body) or filtered out (query) before the request goes out, so no
-#: parameter is sent that the caller did not ask for. A new parameter must be
-#: added here to be sent at all.
+#: Request fields this client generates itself. Any other field the generated
+#: builder writes is reset to UNSET (body) or filtered out (query) before the
+#: request goes out, so a new parameter must be added here to be sent at all.
+#: This bounds what the client generates, not the whole outgoing query: the
+#: status endpoint's own query is forwarded on top by design (see
+#: ``_forwarded_query``).
 _EXECUTE_SEND_ONLY = frozenset(
     {"timeout", "include_metadata", "files", "additional_properties"}
 )
@@ -213,7 +259,10 @@ class APIDeploymentsClient:
 
         Args:
             api_key (str): The API key to authenticate the API request.
-            api_timeout (int): The timeout to wait for the API response.
+            api_timeout (int): Backend execution mode sent with the request —
+                see ``timeout`` on ``structure_file``. ``0`` or below queues the
+                execution and returns; above it the call runs synchronously and
+                the value bounds how long the backend waits.
             logging_level (str): The logging level to log messages.
             max_retries (int): Maximum number of retry attempts for failed requests.
             initial_delay (float): Initial delay in seconds before the first retry.
@@ -256,6 +305,8 @@ class APIDeploymentsClient:
         self.backoff_factor = backoff_factor
         self.jitter = jitter
         self.transport_timeout = transport_timeout
+        self._transport_client = None
+        self._transport_lock = threading.Lock()
 
     def _is_retryable_status(self, status_code: int) -> bool:
         """Checks whether a status code should trigger a retry.
@@ -287,20 +338,45 @@ class APIDeploymentsClient:
         timeout; feeding it to the transport fails deep in the connection layer
         for the negative values the API accepts. ``transport_timeout`` is the
         way to bound a stalled connection.
+
+        Built under a lock: two threads racing the first call would otherwise
+        each build a pool and one would be dropped still holding its sockets.
         """
-        if getattr(self, "_transport_client", None) is None:
-            self._transport_client = AuthenticatedClient(
-                base_url=self.base_url,
-                token=self.api_key,
-                verify_ssl=self.verify,
-                timeout=httpx.Timeout(self.transport_timeout),
-                raise_on_unexpected_status=False,
-                # The previous transport followed redirects. Without this a 30x
-                # from a load balancer is read as a terminal result with no
-                # status, which a poll loop reports as a finished-and-empty job.
-                follow_redirects=True,
-            )
+        if self._transport_client is None:
+            with self._transport_lock:
+                if self._transport_client is None:
+                    self._transport_client = AuthenticatedClient(
+                        base_url=self.base_url,
+                        token=self.api_key,
+                        verify_ssl=self.verify,
+                        timeout=httpx.Timeout(self.transport_timeout),
+                        raise_on_unexpected_status=False,
+                        # The previous transport followed redirects. Without this
+                        # a 30x from a load balancer is read as a terminal result
+                        # with no status, which a poll loop reports as a
+                        # finished-and-empty job.
+                        follow_redirects=True,
+                    )
         return self._transport_client
+
+    def close(self) -> None:
+        """Release the pooled connections this client holds.
+
+        The transport is kept between calls so connections are reused; nothing
+        else releases its sockets, and a client built per job would otherwise
+        accumulate pools until each instance is collected. Safe to call more
+        than once, and the next request builds a fresh transport.
+        """
+        with self._transport_lock:
+            transport, self._transport_client = self._transport_client, None
+        if transport is not None:
+            transport.get_httpx_client().close()
+
+    def __enter__(self) -> "APIDeploymentsClient":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
 
     @property
     def _deployment_route(self) -> tuple[str, str]:
@@ -363,7 +439,8 @@ class APIDeploymentsClient:
 
         A model is only built for the statuses the spec declares, and error
         bodies are typed loosely, so an undeclared status or any error response
-        has no usable model. ``None`` means the body was not JSON.
+        has no usable model. ``None`` means there is nothing to read: either the
+        body was not JSON, or it was the JSON literal ``null``.
         """
         try:
             return response.json()
@@ -495,7 +572,8 @@ class APIDeploymentsClient:
 
         Args:
             file_paths (list[str]): The file path to the file to be uploaded.
-            timeout (int): Execution mode — ``0`` or below runs asynchronously.
+            timeout (int): Execution mode — ``0`` or below queues the execution
+                and returns immediately; above it the call runs synchronously.
             include_metadata (bool): Include metadata in the result.
             include_metrics (bool): Include metrics in the result.
             include_extracted_text (bool): Include the extracted text.
@@ -505,7 +583,9 @@ class APIDeploymentsClient:
             hitl_queue_name (str): Human-in-the-loop queue to route the file to.
             hitl_packet_id (str): Human-in-the-loop packet to attach the file to.
             presigned_urls (list[str]): URLs to fetch the inputs from.
-            custom_data (Any): Arbitrary data echoed back with the result.
+            custom_data (Any): Arbitrary JSON, returned under each result
+                item's ``metadata.custom_data``. Anything that is not already a
+                string is serialised to JSON before it is sent.
 
         Returns:
             dict: The response from the API.
@@ -534,6 +614,12 @@ class APIDeploymentsClient:
             for k, v in requested.items()
             if not isinstance(v, Unset) and v is not None
         }
+        if "custom_data" in requested and not isinstance(requested["custom_data"], str):
+            # A form field carries text, and the generated encoder writes
+            # ``str(value)`` -- a Python repr, which the server's JSON field
+            # cannot parse. Strings are passed through, so a caller already
+            # serialising its own payload is unaffected.
+            requested["custom_data"] = json.dumps(requested["custom_data"])
         params = {
             "timeout": self.api_timeout,
             "include_metadata": self.include_metadata,
@@ -545,10 +631,19 @@ class APIDeploymentsClient:
         try:
             for file_path in file_paths:
                 handles.append(open(file_path, "rb"))
-        except FileNotFoundError as e:
+        except OSError as e:
+            # Every open failure, not just a missing file: a directory or an
+            # unreadable path would otherwise leave the handles opened so far
+            # held by the traceback, and reach the caller as a builtin rather
+            # than the exception this class documents.
             for handle in handles:
                 handle.close()
-            raise APIDeploymentsClientException("File not found: " + str(e))
+            reason = (
+                "File not found"
+                if isinstance(e, FileNotFoundError)
+                else "Cannot read file"
+            )
+            raise APIDeploymentsClientException(f"{reason}: {e}") from e
 
         body = ExecuteRequest(
             files=[
@@ -569,8 +664,10 @@ class APIDeploymentsClient:
             if field.name not in send_only:
                 setattr(body, field.name, UNSET)
 
-        org_name, api_name = self._deployment_route
-        request_kwargs = execute._get_kwargs(org_name, api_name, body=body)
+        # Placeholders: the generated builder only spends these on the URL, and
+        # the URL is discarded below in favour of the caller's own. Deriving a
+        # route here would reject deployment URLs the released client posted to.
+        request_kwargs = execute._get_kwargs("", "", body=body)
         # The generated builder pins a fixed multipart boundary in the header. An
         # uploaded file containing those bytes would break the encoding, so let
         # the transport pick a random boundary instead.
@@ -583,9 +680,11 @@ class APIDeploymentsClient:
         url = self.api_url
 
         try:
-            if params["timeout"] == 0:
-                # The request only queues the execution, so a 5xx means queuing
-                # failed and retrying cannot duplicate work.
+            if params["timeout"] <= 0:
+                # Zero and below only queue the execution, so a 5xx means
+                # queuing failed and retrying cannot duplicate work. ``-1`` is
+                # the API's own default for this, so it has to take this branch
+                # too.
                 response = self._request_with_retry(method, url, **request_kwargs)
             else:
                 # The request runs the execution, so a 5xx may mean it ran and
@@ -615,18 +714,13 @@ class APIDeploymentsClient:
                 "extraction_result": "",
             }
             return obj_to_return
-        response_message = response_data.get("message", {})
-        if response.status_code == 401:
-            obj_to_return = {
-                "status_code": response.status_code,
-                "pending": False,
-                "execution_status": "",
-                "error": response_data.get("errors", [{}])[0].get(
-                    "detail", "Unauthorized"
-                ),
-                "extraction_result": "",
-            }
-            return obj_to_return
+        # An error body carries no success envelope, and the shapes the API
+        # answers errors with put a string or a list where this reads a mapping.
+        response_message = (
+            response_data.get("message") if isinstance(response_data, dict) else None
+        )
+        if not isinstance(response_message, dict):
+            response_message = {}
 
         # If the execution status is pending, extract the execution ID from
         # the response and return it in the response.
@@ -638,6 +732,8 @@ class APIDeploymentsClient:
         error_message = response_message.get("error", "")
         extraction_result = response_message.get("result", "")
         status_api_endpoint = response_message.get("status_api")
+        if not error_message and not 200 <= response.status_code < 300:
+            error_message = _error_text(response_data, response)
 
         obj_to_return = {
             "status_code": response.status_code,
@@ -749,9 +845,15 @@ class APIDeploymentsClient:
             return obj_to_return
 
         # Construct response object
-        execution_status = response_data.get("status", "")
-        error_message = response_data.get("error", "")
-        extraction_result = response_data.get("message", "")
+        body = response_data if isinstance(response_data, dict) else {}
+        execution_status = body.get("status", "")
+        error_message = body.get("error", "")
+        extraction_result = body.get("message", "")
+        if not error_message and not 200 <= response.status_code < 300:
+            # The reason lives outside the fields read above in both shapes the
+            # API answers errors with, so without this a failed poll is
+            # indistinguishable from a finished-and-empty one.
+            error_message = _error_text(response_data, response)
 
         obj_to_return = {
             "status_code": response.status_code,

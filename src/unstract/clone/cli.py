@@ -1,7 +1,6 @@
 """Click-based CLI for ``unstract.clone``.
 
-Single ``clone`` command, invoked as ``python -m unstract.clone``. The
-``unstract`` CLI wraps the orchestrator directly rather than this module.
+Single ``clone`` command, invoked as ``python -m unstract.clone clone``.
 
 Platform keys can be passed via flags (``--source-key`` / ``--target-key``)
 or env vars (``UNSTRACT_SRC_PLATFORM_KEY`` / ``UNSTRACT_TGT_PLATFORM_KEY``)

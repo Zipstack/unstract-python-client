@@ -66,10 +66,10 @@ def _parse_response(
 
         return response_404
 
-    if response.status_code == 409:
-        response_409 = ErrorResponse.from_dict(response.json())
+    if response.status_code == 413:
+        response_413 = ErrorResponse.from_dict(response.json())
 
-        return response_409
+        return response_413
 
     if response.status_code == 422:
         response_422 = ExecuteResponse.from_dict(response.json())
@@ -82,9 +82,19 @@ def _parse_response(
         return response_429
 
     if response.status_code == 500:
-        response_500 = ErrorResponse.from_dict(response.json())
+        response_500 = ExecuteResponse.from_dict(response.json())
 
         return response_500
+
+    if response.status_code == 502:
+        response_502 = ErrorResponse.from_dict(response.json())
+
+        return response_502
+
+    if response.status_code == 504:
+        response_504 = ErrorResponse.from_dict(response.json())
+
+        return response_504
 
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)

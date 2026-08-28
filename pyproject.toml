@@ -11,7 +11,8 @@ dependencies = [
     # series: a bump has to be regenerated and re-tested, not resolved into.
     "httpx>=0.27,<0.29",
     "attrs>=23.2",
-    # Kept for its exception classes, which callers catch by name.
+    # Still the transport for the `unstract.clone` subpackage, and the source of
+    # the exception classes callers catch by name around the deployment client.
     "requests>=2.32.3",
     "tenacity>=8.2.0",
     "click>=8.1",

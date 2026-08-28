@@ -65,15 +65,28 @@ except APIDeploymentsClientException as e:
 
 `api_url`: The URL of the Unstract API deployment.
 `api_key`: Your raw API key. **Do not** include the `"Bearer "` prefix — the client adds it automatically.
-`api_timeout`: Set a timeout for API requests, e.g., `api_timeout=10`.
+`api_timeout`: Backend execution mode sent with the request (see `timeout` on `structure_file`). `0` or below queues the execution and returns immediately; above it the call runs synchronously and the value bounds how long the backend waits. This is not a socket timeout — pass `transport_timeout` for that.
 `logging_level`: Set logging verbosity (e.g., "`DEBUG`").
 `include_metadata`: If set to `True`, the response will include additional metadata (cost, tokens consumed and context) for each call made by the Prompt Studio exported tool.
+`transport_timeout`: Socket timeout in seconds (keyword-only). Left unset, a stalled connection blocks forever, which is what earlier releases did.
+
+## Closing the client
+
+The client reuses connections between calls, so release them when you are done
+with it — either by calling `close()`, or by using it as a context manager:
+
+```python
+with APIDeploymentsClient(api_url="url", api_key="your_api_key") as adc:
+    response = adc.structure_file(["<file>"])
+```
+
+A long-lived client can be left open; one built per job should be closed.
 
 ## Retry Configuration
 
 The client includes built-in exponential backoff retry with the following behavior:
 
-- **Async mode** (`api_timeout=0`): POST requests are retried on transient failures (5xx, 429) and connection errors, since the server returns immediately after queuing.
+- **Async mode** (`api_timeout` of `0` or below): POST requests are retried on transient failures (5xx, 429) and connection errors, since the server returns immediately after queuing.
 - **Sync mode** (`api_timeout > 0`, the default): POST requests are **not** retried, because the server blocks during processing — a failure may mean the request was processed but the response was lost.
 - **Status polling** (`check_execution_status`): GET requests are always retried, as they are idempotent.
 
@@ -100,18 +113,24 @@ client = APIDeploymentsClient(
 The retry logic uses exponential backoff with full jitter and respects the `Retry-After` header on 429 responses.
 
 
+## Internals
+
+`unstract.api_deployments.sdk_docstudio` is generated from the deployment API's
+OpenAPI spec by `tools/gen_sdk.sh` and is an implementation detail of the
+transport. `APIDeploymentsClient` is the supported surface — import from it, not
+from the generated tree, which is regenerated wholesale whenever the spec moves.
+
 ## Cloning an organization
 
-Installing `unstract-client` also provides a clone command. The `unstract`
-console script this package used to install is gone — the name now belongs to
-the `unstract-cli` package — so invoke it as a module:
+Installing `unstract-client` also provides a clone command. This package no
+longer installs an `unstract` console script, so invoke it as a module:
 
 ```bash
 pip install unstract-client
 python -m unstract.clone --help
 ```
 
-### `python -m unstract.clone`
+### `python -m unstract.clone clone`
 
 Clones an organization's resources to another org, on the same or a different
 deployment (e.g. promote **dev** → **QA** → **prod**). Covers adapters,
@@ -126,7 +145,7 @@ so keys never land in shell history:
 export UNSTRACT_SRC_PLATFORM_KEY="<source platform key>"
 export UNSTRACT_TGT_PLATFORM_KEY="<target platform key>"
 
-python -m unstract.clone \
+python -m unstract.clone clone \
   --source-url https://dev.example.com --source-org org_dev123 \
   --target-url https://qa.example.com --target-org org_qa456 \
   --dry-run

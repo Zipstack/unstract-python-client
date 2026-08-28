@@ -7,6 +7,7 @@ import httpx
 
 from ... import errors
 from ...client import AuthenticatedClient, Client
+from ...models.acknowledged_response import AcknowledgedResponse
 from ...models.error_response import ErrorResponse
 from ...models.status_response import StatusResponse
 from ...types import UNSET, Response, Unset
@@ -48,7 +49,7 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> ErrorResponse | StatusResponse | None:
+) -> AcknowledgedResponse | ErrorResponse | StatusResponse | None:
     if response.status_code == 200:
         response_200 = StatusResponse.from_dict(response.json())
 
@@ -75,7 +76,7 @@ def _parse_response(
         return response_404
 
     if response.status_code == 406:
-        response_406 = ErrorResponse.from_dict(response.json())
+        response_406 = AcknowledgedResponse.from_dict(response.json())
 
         return response_406
 
@@ -84,13 +85,8 @@ def _parse_response(
 
         return response_422
 
-    if response.status_code == 429:
-        response_429 = ErrorResponse.from_dict(response.json())
-
-        return response_429
-
     if response.status_code == 500:
-        response_500 = ErrorResponse.from_dict(response.json())
+        response_500 = StatusResponse.from_dict(response.json())
 
         return response_500
 
@@ -102,7 +98,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[ErrorResponse | StatusResponse]:
+) -> Response[AcknowledgedResponse | ErrorResponse | StatusResponse]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -120,12 +116,15 @@ def sync_detailed(
     include_extracted_text: bool | Unset = False,
     include_metadata: bool | Unset = False,
     include_metrics: bool | Unset = False,
-) -> Response[ErrorResponse | StatusResponse]:
+) -> Response[AcknowledgedResponse | ErrorResponse | StatusResponse]:
     """Read the result of a previously started execution.
 
     This read is one-shot: the first call that observes a completed execution acknowledges it and the
     stored result is discarded, so every later call for that execution answers 406. Poll while the
     execution is pending, and keep the payload of the call that returns it — it cannot be fetched again.
+
+    A still-running execution answers 422 carrying its current `status`, so a polling loop should treat
+    422 as the normal reply and stop on 200. Clients that raise on any non-2xx need to allow for that.
 
     Args:
         org_name (str):
@@ -140,7 +139,7 @@ def sync_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | StatusResponse]
+        Response[AcknowledgedResponse | ErrorResponse | StatusResponse]
     """
 
     kwargs = _get_kwargs(
@@ -168,12 +167,15 @@ def sync(
     include_extracted_text: bool | Unset = False,
     include_metadata: bool | Unset = False,
     include_metrics: bool | Unset = False,
-) -> ErrorResponse | StatusResponse | None:
+) -> AcknowledgedResponse | ErrorResponse | StatusResponse | None:
     """Read the result of a previously started execution.
 
     This read is one-shot: the first call that observes a completed execution acknowledges it and the
     stored result is discarded, so every later call for that execution answers 406. Poll while the
     execution is pending, and keep the payload of the call that returns it — it cannot be fetched again.
+
+    A still-running execution answers 422 carrying its current `status`, so a polling loop should treat
+    422 as the normal reply and stop on 200. Clients that raise on any non-2xx need to allow for that.
 
     Args:
         org_name (str):
@@ -188,7 +190,7 @@ def sync(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | StatusResponse
+        AcknowledgedResponse | ErrorResponse | StatusResponse
     """
 
     return sync_detailed(
@@ -211,12 +213,15 @@ async def asyncio_detailed(
     include_extracted_text: bool | Unset = False,
     include_metadata: bool | Unset = False,
     include_metrics: bool | Unset = False,
-) -> Response[ErrorResponse | StatusResponse]:
+) -> Response[AcknowledgedResponse | ErrorResponse | StatusResponse]:
     """Read the result of a previously started execution.
 
     This read is one-shot: the first call that observes a completed execution acknowledges it and the
     stored result is discarded, so every later call for that execution answers 406. Poll while the
     execution is pending, and keep the payload of the call that returns it — it cannot be fetched again.
+
+    A still-running execution answers 422 carrying its current `status`, so a polling loop should treat
+    422 as the normal reply and stop on 200. Clients that raise on any non-2xx need to allow for that.
 
     Args:
         org_name (str):
@@ -231,7 +236,7 @@ async def asyncio_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | StatusResponse]
+        Response[AcknowledgedResponse | ErrorResponse | StatusResponse]
     """
 
     kwargs = _get_kwargs(
@@ -257,12 +262,15 @@ async def asyncio(
     include_extracted_text: bool | Unset = False,
     include_metadata: bool | Unset = False,
     include_metrics: bool | Unset = False,
-) -> ErrorResponse | StatusResponse | None:
+) -> AcknowledgedResponse | ErrorResponse | StatusResponse | None:
     """Read the result of a previously started execution.
 
     This read is one-shot: the first call that observes a completed execution acknowledges it and the
     stored result is discarded, so every later call for that execution answers 406. Poll while the
     execution is pending, and keep the payload of the call that returns it — it cannot be fetched again.
+
+    A still-running execution answers 422 carrying its current `status`, so a polling loop should treat
+    422 as the normal reply and stop on 200. Clients that raise on any non-2xx need to allow for that.
 
     Args:
         org_name (str):
@@ -277,7 +285,7 @@ async def asyncio(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | StatusResponse
+        AcknowledgedResponse | ErrorResponse | StatusResponse
     """
 
     return (

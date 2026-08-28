@@ -5,6 +5,16 @@ behaviour must not. These tests pin the seams where that could silently break:
 the constructor and method signatures, what goes out on the wire, which
 exceptions come back out, and the exact dict each method returns — the last one
 by running the released client side by side over the same responses.
+
+This suite exists for the transport migration, not forever: once the released
+client it compares against is old enough that no caller is upgrading from it,
+it should be dropped or re-baselined deliberately (``tools/refresh_baseline.sh``)
+rather than edited case by case until it passes.
+
+Differences from the baseline that are accepted rather than fixed are asserted
+here explicitly, each in the test that would otherwise be blind to it — the
+``User-Agent``, the per-part ``Content-Type`` on form fields, and the error text
+now reported for non-2xx bodies the baseline dropped.
 """
 
 import ast
@@ -16,6 +26,7 @@ import json
 import re
 import socket
 import threading
+import tomllib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
@@ -27,6 +38,7 @@ from requests.exceptions import (
     ConnectionError,
     ConnectTimeout,
     ContentDecodingError,
+    InvalidHeader,
     MissingSchema,
     ProxyError,
     ReadTimeout,
@@ -41,6 +53,7 @@ from unstract.api_deployments.client import (
     APIDeploymentsClient,
     APIDeploymentsClientException,
 )
+from unstract.api_deployments.sdk_docstudio.types import UNSET
 
 BASELINE_VERSION = "1.5.3"
 BASELINE_PATH = Path(__file__).parent / "baseline" / "client_1_5_3.py"
@@ -132,6 +145,10 @@ def _requests_response(status_code=200, json_data=None, text=None):
         (httpx.UnsupportedProtocol("no scheme"), MissingSchema),
         (httpx.TooManyRedirects("looping"), TooManyRedirects),
         (httpx.DecodingError("bad gzip"), ContentDecodingError),
+        # A request that cannot be written as composed -- an api_key carrying a
+        # newline is the everyday cause -- is a client-side fault, not the
+        # server-side framing failure its parent ProtocolError stands for.
+        (httpx.LocalProtocolError("illegal header value"), InvalidHeader),
     ],
 )
 def test_transport_errors_are_translated(raised, expected):
@@ -211,10 +228,12 @@ def test_no_httpx_failure_escapes_untranslated(cls):
         (httpx.PoolTimeout("pool timed out"), True),
         (httpx.ProxyError("proxy exploded"), True),
         # Retrying these cannot start working: the URL stays malformed, the
-        # redirect chain stays a loop, the body stays undecodable.
+        # redirect chain stays a loop, the body stays undecodable, the header
+        # stays illegal.
         (httpx.UnsupportedProtocol("no scheme"), False),
         (httpx.TooManyRedirects("looping"), False),
         (httpx.DecodingError("bad gzip"), False),
+        (httpx.LocalProtocolError("illegal header value"), False),
     ],
 )
 def test_translation_decides_what_gets_retried(raised, retried):
@@ -431,6 +450,52 @@ def test_a_falsy_parameter_is_still_sent(sample_file, param, value, expected):
     assert parts[param][1] == expected
 
 
+@pytest.mark.parametrize(
+    "param", ["llm_profile_id", "hitl_queue_name", "hitl_packet_id"]
+)
+def test_an_explicit_none_is_not_sent(sample_file, param):
+    """``None`` is how a caller forwards "no override" from its own optional
+    config. A form field carries no null, so one sent at all goes out as the
+    literal string ``"None"`` for the service to look up."""
+    parts = _execute_parts(_client(api_timeout=300), sample_file, **{param: None})
+    assert param not in parts
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ({"a": 1, "b": "x"}, b'{"a": 1, "b": "x"}'),
+        ([1, 2], b"[1, 2]"),
+        (True, b"true"),
+        # Already a string: passed through, so a caller serialising its own
+        # payload does not get it JSON-encoded a second time.
+        ('{"a": 1}', b'{"a": 1}'),
+    ],
+)
+def test_custom_data_goes_out_as_json(sample_file, value, expected):
+    """The generated encoder writes ``str(value)``. For anything but a string
+    that is a Python repr, which the server's JSON field cannot parse."""
+    parts = _execute_parts(_client(api_timeout=300), sample_file, custom_data=value)
+    assert parts["custom_data"][1] == expected
+
+
+def test_custom_data_is_json_on_the_wire(tmp_path):
+    """Read off the socket, not out of the kwargs: the encoding step between
+    the two is where a repr would survive unnoticed."""
+    path = tmp_path / "sample.txt"
+    path.write_bytes(b"hello")
+
+    (raw,) = _wire_requests(
+        lambda url: _client(api_url=url, api_timeout=300).structure_file(
+            [str(path)], custom_data={"a": 1, "b": "x"}
+        )
+    )
+    sent = {
+        field: content for field, _filename, content, _headers in _multipart_parts(raw)
+    }
+    assert json.loads(sent["custom_data"]) == {"a": 1, "b": "x"}
+
+
 def test_a_requested_parameter_overrides_the_constructor(sample_file):
     parts = _execute_parts(
         _client(api_timeout=300, include_metadata=False),
@@ -442,23 +507,41 @@ def test_a_requested_parameter_overrides_the_constructor(sample_file):
     assert parts["include_metadata"][1] == b"True"
 
 
-def test_a_requested_timeout_selects_the_execution_mode(sample_file):
-    """``timeout`` is an execution mode: ``0`` queues, so a 5xx is safe to
-    retry.
+@pytest.mark.parametrize("timeout", [0, -1, 300])
+def test_a_requested_timeout_selects_the_execution_mode(sample_file, timeout):
+    """``timeout`` is an execution mode: at or below zero the request only
+    queues, so a 5xx is safe to retry; above it the request runs the execution
+    and a retry would run it twice.
 
-    Passing it per request has to move that decision with it.
+    ``-1`` is the API's own default for queue-only, so it belongs on the retried
+    side even though the released client tested for exactly ``0``. Passing the
+    mode per request has to move the decision with it.
     """
+    queues = timeout <= 0
     with patch.object(APIDeploymentsClient, "_request_with_retry") as retried:
         with patch.object(APIDeploymentsClient, "_send") as sent:
             retried.return_value = sent.return_value = _httpx_response(
                 200, {"message": {}}
             )
-            _client(api_timeout=300).structure_file([sample_file], timeout=0)
-            assert retried.called and not sent.called
+            # Constructor set the other way round, so only the per-request
+            # value can be what decided this.
+            _client(api_timeout=300 if queues else 0).structure_file(
+                [sample_file], timeout=timeout
+            )
+            assert retried.called is queues
+            assert sent.called is not queues
 
-            retried.reset_mock()
-            _client(api_timeout=0).structure_file([sample_file], timeout=300)
-            assert sent.called and not retried.called
+
+@pytest.mark.parametrize("api_timeout", [0, -1])
+def test_a_queue_only_execution_is_retried(sample_file, api_timeout):
+    """A 5xx on a queue-only request means queuing failed; retrying cannot
+    duplicate work, and not retrying hands back a finished-looking result with
+    no execution behind it."""
+    client = _client(api_timeout=api_timeout, max_retries=2, initial_delay=0, jitter=0)
+    with patch.object(APIDeploymentsClient, "_send") as sent:
+        sent.return_value = _httpx_response(503, {"message": {}})
+        client.structure_file([sample_file])
+    assert sent.call_count == 3
 
 
 def test_multipart_boundary_is_random_and_matches_the_body(sample_file):
@@ -799,8 +882,13 @@ def _wire_heads(*calls):
     return [_headers(raw.split(b"\r\n\r\n")[0]) for raw in _wire_requests(*calls)]
 
 
-def _multipart_parts(raw: bytes) -> list[tuple[str, str, bytes]]:
-    """``(field, filename, content)`` for every part of a multipart request.
+def _multipart_parts(raw: bytes) -> list[tuple[str, str, bytes, tuple]]:
+    """``(field, filename, content, headers)`` for every part of a multipart
+    request.
+
+    The headers are carried too: a difference in them is invisible to a
+    comparison of what the parts contain, and the parts of this request do
+    differ from the released client's there.
 
     The boundary itself is deliberately not compared: it is random per request
     in both clients, so only what it delimits can be.
@@ -820,6 +908,11 @@ def _multipart_parts(raw: bytes) -> list[tuple[str, str, bytes]]:
                 field.group(1) if field else "",
                 filename.group(1) if filename else "",
                 content.removesuffix(b"\r\n"),
+                tuple(
+                    line.split(":", 1)[0].strip().lower()
+                    for line in disposition.strip().splitlines()
+                    if ":" in line
+                ),
             )
         )
     return parts
@@ -867,12 +960,34 @@ def test_a_multi_file_upload_matches_the_released_client(tmp_path):
     # Sorted: the two clients order the fields differently, which no multipart
     # parser reads as meaning. The order of the files among themselves is the
     # part that carries meaning, and it is pinned below.
-    assert sorted(_multipart_parts(ours)) == sorted(_multipart_parts(theirs))
+    assert sorted(part[:3] for part in _multipart_parts(ours)) == sorted(
+        part[:3] for part in _multipart_parts(theirs)
+    )
     uploaded = [part for part in _multipart_parts(ours) if part[0] == "files"]
-    assert [(filename, content) for _, filename, content in uploaded] == [
+    assert [(part[1], part[2]) for part in uploaded] == [
         ("first.txt", b"one"),
         ("second.txt", b"two"),
     ]
+
+    # The one accepted difference in the parts themselves: the released client
+    # sent scalars through `requests`' `data=`, which writes only a
+    # Content-Disposition, while the generated encoder types every scalar as
+    # text/plain. Django routes on the presence of `filename`, so nothing
+    # downstream reads the extra header -- but it is a real difference and it
+    # is asserted rather than left invisible.
+    scalar_headers = {
+        part[0]: part[3] for part in _multipart_parts(ours) if part[0] != "files"
+    }
+    assert scalar_headers
+    assert all(
+        headers == ("content-disposition", "content-type")
+        for headers in scalar_headers.values()
+    )
+    assert all(
+        part[3] == ("content-disposition",)
+        for part in _multipart_parts(theirs)
+        if part[0] != "files"
+    )
 
 
 def test_redirects_are_followed():
@@ -945,11 +1060,70 @@ def test_transport_timeout_bounds_a_stalled_connection():
 
 
 def test_deployment_route_rejects_an_unusable_url():
-    from unstract.api_deployments.client import APIDeploymentsClientException
-
     client = _client(api_url="https://api.example.com/onlyone")
     with pytest.raises(APIDeploymentsClientException):
         _ = client._deployment_route
+
+
+@pytest.mark.parametrize(
+    "api_url", ["https://gw.example.com/extract/", "https://api.example.com/myapi/"]
+)
+def test_execute_does_not_need_a_derivable_route(sample_file, api_url):
+    """The route is only ever spent on a URL execute then discards, so requiring
+    one would reject deployment URLs the released client posted to -- an ingress
+    or reverse-proxy rewrite short enough to have no org/API pair in it.
+
+    Only ``check_execution_status``, which rebuilds the poll path, needs it.
+    """
+    with patch.object(APIDeploymentsClient, "_send") as mock_send:
+        mock_send.return_value = _httpx_response(200, {"message": {}})
+        _client(api_url=api_url).structure_file([sample_file])
+
+    with patch.object(baseline, "requests") as mock_requests:
+        mock_requests.post.return_value = _requests_response(200, {"message": {}})
+        _baseline_client(api_url=api_url).structure_file([sample_file])
+
+    assert mock_send.call_args[0][1] == mock_requests.post.call_args[0][0] == api_url
+
+
+def test_the_client_releases_its_connections():
+    """The transport is pooled and kept between calls; nothing else closes it,
+    so a client built per job would accumulate pools until collected."""
+    client = _client()
+    httpx_client = client._transport.get_httpx_client()
+    client.close()
+    assert httpx_client.is_closed
+    assert client._transport_client is None
+    # Idempotent, and the next call builds a fresh transport rather than
+    # reaching into a closed pool.
+    client.close()
+    assert client._transport.get_httpx_client() is not httpx_client
+
+
+def test_the_client_is_a_context_manager():
+    with _client() as client:
+        httpx_client = client._transport.get_httpx_client()
+    assert httpx_client.is_closed
+
+
+def test_the_transport_is_built_once_under_contention():
+    """Two threads racing the first call would otherwise each build a pool, and
+    the one that lost would be dropped still holding its sockets."""
+    client = _client()
+    built = []
+    barrier = threading.Barrier(8)
+
+    def race():
+        barrier.wait()
+        built.append(client._transport)
+
+    threads = [threading.Thread(target=race) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(set(map(id, built))) == 1
 
 
 # --------------------------------------------------------------------------
@@ -1013,12 +1187,260 @@ def test_structure_file_matches_on_a_non_json_body(sample_file):
 
 
 def test_structure_file_missing_file_still_raises(sample_file):
-    from unstract.api_deployments.client import APIDeploymentsClientException
-
-    with pytest.raises(APIDeploymentsClientException):
+    with pytest.raises(APIDeploymentsClientException) as caught:
         _client().structure_file(["/nonexistent/file.txt"])
+    assert "File not found" in str(caught.value)
     with pytest.raises(baseline.APIDeploymentsClientException):
         _baseline_client().structure_file(["/nonexistent/file.txt"])
+
+
+def test_an_unreadable_file_raises_the_documented_exception(tmp_path, sample_file):
+    """Not only a missing one: a directory or an unreadable path reached the
+    caller as a raw builtin, past the handles already opened for the files
+    before it."""
+    opened = []
+    real_open = open
+
+    def tracking_open(*args, **kwargs):
+        handle = real_open(*args, **kwargs)
+        opened.append(handle)
+        return handle
+
+    directory = tmp_path / "adir"
+    directory.mkdir()
+    with patch("builtins.open", side_effect=tracking_open):
+        with pytest.raises(APIDeploymentsClientException) as caught:
+            _client().structure_file([sample_file, str(directory)])
+
+    assert "File not found" not in str(caught.value)
+    assert opened and all(handle.closed for handle in opened)
+
+
+# Error shapes the API answers with. The handler-routed statuses answer with
+# drf-standardized-errors; a few are still built by hand. The baseline read the
+# reason out of neither, so a caller saw an empty error next to a status code —
+# an accepted difference from parity, and the reason for these tests.
+ERROR_BODY_CASES = [
+    (
+        "standardized",
+        400,
+        {
+            "type": "validation_error",
+            "errors": [
+                {
+                    "code": "invalid",
+                    "detail": "Queue 'nope' does not exist",
+                    "attr": "hitl_queue_name",
+                }
+            ],
+        },
+        "Queue 'nope' does not exist",
+    ),
+    (
+        "standardized_multiple",
+        400,
+        {
+            "type": "validation_error",
+            "errors": [
+                {"code": "invalid", "detail": "first", "attr": "a"},
+                {"code": "invalid", "detail": "second", "attr": "b"},
+            ],
+        },
+        "first; second",
+    ),
+    (
+        "hand_built",
+        404,
+        {"status": "ERROR", "message": "API deployment not found"},
+        "API deployment not found",
+    ),
+    ("unauthorized", 401, {"errors": [{"detail": "Invalid token"}]}, "Invalid token"),
+]
+
+#: Bodies carrying nothing readable. Neither shape may crash, and the body
+#: itself is more use to a caller than an empty string.
+UNREADABLE_ERROR_BODIES = [
+    ("no_detail", 409, {"type": "conflict", "errors": []}),
+    ("a_list", 502, [1, 2]),
+    ("a_string", 403, "forbidden"),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "status_code", "body", "expected"),
+    ERROR_BODY_CASES,
+    ids=[c[0] for c in ERROR_BODY_CASES],
+)
+def test_structure_file_reports_the_reason_an_error_carries(
+    sample_file, name, status_code, body, expected
+):
+    with patch.object(APIDeploymentsClient, "_send") as mock_send:
+        mock_send.return_value = _httpx_response(status_code, body)
+        result = _client(api_timeout=300).structure_file([sample_file])
+
+    assert result["error"] == expected
+    assert result["status_code"] == status_code
+    assert result["pending"] is False
+
+
+@pytest.mark.parametrize(
+    ("name", "status_code", "body", "expected"),
+    ERROR_BODY_CASES,
+    ids=[c[0] for c in ERROR_BODY_CASES],
+)
+def test_check_execution_status_reports_the_reason_an_error_carries(
+    name, status_code, body, expected
+):
+    with patch.object(APIDeploymentsClient, "_send") as mock_send:
+        mock_send.return_value = _httpx_response(status_code, body)
+        result = _client().check_execution_status(STATUS_ENDPOINT)
+
+    assert result["error"] == expected
+    assert result["status_code"] == status_code
+
+
+@pytest.mark.parametrize(
+    ("name", "status_code", "body"),
+    UNREADABLE_ERROR_BODIES,
+    ids=[c[0] for c in UNREADABLE_ERROR_BODIES],
+)
+def test_an_unreadable_error_body_is_reported_not_raised(
+    sample_file, name, status_code, body
+):
+    with patch.object(APIDeploymentsClient, "_send") as mock_send:
+        mock_send.return_value = _httpx_response(status_code, body)
+        executed = _client(api_timeout=300).structure_file([sample_file])
+
+    with patch.object(APIDeploymentsClient, "_send") as mock_send:
+        mock_send.return_value = _httpx_response(status_code, body)
+        polled = _client().check_execution_status(STATUS_ENDPOINT)
+
+    for result in (executed, polled):
+        assert result["status_code"] == status_code
+        assert json.loads(result["error"]) == body
+
+
+def _declared_responses(operation_id: str) -> dict[int, str]:
+    """``{status: schema name}`` for one operation, read out of the spec."""
+    spec = json.loads(SPEC_PATH.read_text())
+    for path in spec["paths"].values():
+        for method, operation in path.items():
+            if method not in {"get", "post"}:
+                continue
+            if operation["operationId"] != operation_id:
+                continue
+            return {
+                int(code): body["content"]["application/json"]["schema"]["$ref"].split(
+                    "/"
+                )[-1]
+                for code, body in operation["responses"].items()
+            }
+    raise AssertionError(f"{operation_id} not declared in the spec")
+
+
+def _body_for(schema: str) -> dict:
+    """A response body of the shape the spec declares, for an error status.
+
+    Built from the schema name rather than hardcoded per status, so a spec that
+    re-points a status at the other error shape is exercised as the new shape
+    without this table being touched.
+    """
+    if schema == "ErrorResponse":
+        return {
+            "type": "client_error",
+            # `code` is free-form here, deliberately not an enum: the server
+            # emits "error" for statuses the handler routes without a subtype.
+            "errors": [{"code": "error", "detail": "the reason", "attr": None}],
+        }
+    # The shapes still built by hand: 406 acknowledges, 422/500 report setup
+    # failures through the same envelope a success uses.
+    return {"status": "ERROR", "message": "the reason"}
+
+
+@pytest.mark.parametrize("operation", sorted(WRAPPED_OPERATIONS))
+def test_every_error_status_the_spec_declares_is_reported(sample_file, operation):
+    """The spec and this client have to agree on the error body, and they
+    disagreed once: the facade read one shape while the spec declared another.
+
+    Both shapes are declared now, both are read here, and a status the spec adds
+    arrives as a case rather than as an empty ``error`` in production.
+    """
+    declared = _declared_responses(operation)
+    errors = {code: schema for code, schema in declared.items() if code != 200}
+    assert errors, operation
+    # Both shapes are actually in play; a regression to one of them is a
+    # narrowing this would otherwise not notice.
+    assert set(errors.values()) > {"ErrorResponse"}
+
+    for status_code, schema in errors.items():
+        body = _body_for(schema)
+        with patch.object(APIDeploymentsClient, "_send") as mock_send:
+            mock_send.return_value = _httpx_response(status_code, body)
+            if operation == "execute":
+                result = _client(api_timeout=300).structure_file([sample_file])
+            else:
+                result = _client().check_execution_status(STATUS_ENDPOINT)
+
+        assert result["status_code"] == status_code, (operation, status_code)
+        assert result["error"] == "the reason", (operation, status_code, schema)
+
+
+def test_the_generated_models_read_the_bodies_the_server_sends():
+    """The generated models are an implementation detail, but a wrong one is a
+    trap for anyone who imports them: the facade would keep working while the
+    models silently lost the payload."""
+    from unstract.api_deployments.sdk_docstudio.models import (
+        ErrorResponse,
+        ExecutionMessage,
+        FileResult,
+    )
+
+    error = ErrorResponse.from_dict(_body_for("ErrorResponse"))
+    assert [detail.detail for detail in error.errors] == ["the reason"]
+    assert error.type_ == "client_error"
+    assert not error.additional_properties
+
+    # `error` and `status_api` are absent on a success and null on a failure;
+    # declared required, either one raised a bare KeyError.
+    message = ExecutionMessage.from_dict(
+        {"execution_id": "exec-123", "execution_status": "SUCCESS"}
+    )
+    assert message.error is UNSET and message.status_api is UNSET
+
+    result = FileResult.from_dict(
+        {"file": "a.pdf", "status": "SUCCESS", "extracted_text": "hello"}
+    )
+    assert result.extracted_text == "hello"
+    assert not result.additional_properties
+    # Dropped from the spec: the server never sent it.
+    assert not hasattr(result, "metrics")
+
+
+def test_a_success_envelope_is_never_read_as_an_error(sample_file):
+    """The fallback only fires where the envelope had nothing: a non-2xx that
+    still carries one is read out of it, the way the released client did."""
+    body = {"message": {"execution_status": "ERROR", "error": "bad input"}}
+    with patch.object(APIDeploymentsClient, "_send") as mock_send:
+        mock_send.return_value = _httpx_response(422, body)
+        ours = _client(api_timeout=300).structure_file([sample_file])
+
+    with patch.object(baseline, "requests") as mock_requests:
+        mock_requests.post.return_value = _requests_response(422, body)
+        theirs = _baseline_client(api_timeout=300).structure_file([sample_file])
+
+    assert ours == theirs
+    assert ours["error"] == "bad input"
+
+
+def test_a_status_endpoint_without_an_execution_id_does_not_report_its_query():
+    """The documented usage prints this exception straight to a log, and the
+    query is the service's to shape."""
+    with pytest.raises(APIDeploymentsClientException) as caught:
+        _client().check_execution_status(
+            "/deployment/api/testorg/testapi/?token=s3cret-signature"
+        )
+    assert "s3cret-signature" not in str(caught.value)
+    assert "/deployment/api/testorg/testapi/" in str(caught.value)
 
 
 def test_structure_file_closes_its_handles(sample_file):
@@ -1146,6 +1568,7 @@ def test_public_methods_are_unchanged():
 
 
 def test_class_attributes_are_unchanged():
+    compared = 0
     for node in _baseline_class_node().body:
         if not isinstance(node, ast.Assign):
             continue
@@ -1155,15 +1578,51 @@ def test_class_attributes_are_unchanged():
             continue  # logger and friends: identity, not value
         for target in node.targets:
             assert getattr(APIDeploymentsClient, target.id) == value, target.id
+            compared += 1
+    # A parse that matches no node asserts nothing and still reports green.
+    assert compared
 
 
 def test_module_level_names_are_unchanged():
     import unstract.api_deployments.client as live
 
     tree = ast.parse(BASELINE_PATH.read_text())
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef) and not node.name.startswith("_"):
-            assert hasattr(live, node.name), node.name
+    names = [
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and not node.name.startswith("_")
+    ]
+    assert names
+    for name in names:
+        assert hasattr(live, name), name
+
+
+#: What an install of this package puts on the path. A removal here is a
+#: breaking change for anyone whose deploy runs the command or imports the
+#: module, so it has to be made in the same diff that moves this list.
+INSTALLED_CONSOLE_SCRIPTS: dict[str, str] = {}
+INSTALLED_TOP_LEVEL_MODULES = {"unstract.api_deployments", "unstract.clone"}
+
+
+def test_the_packaging_surface_is_what_it_claims():
+    """The wire behaviour above is all pinned against the baseline and stays
+    green through a console script being deleted, which is the one published
+    contract this change does break."""
+    pyproject = tomllib.loads(
+        (Path(__file__).parents[1] / "pyproject.toml").read_text()
+    )
+    assert pyproject["project"].get("scripts", {}) == INSTALLED_CONSOLE_SCRIPTS
+
+    src = Path(__file__).parents[1] / "src" / "unstract"
+    packaged = {
+        f"unstract.{path.name}"
+        for path in src.iterdir()
+        if (path / "__init__.py").exists()
+    }
+    assert packaged == INSTALLED_TOP_LEVEL_MODULES
+
+    for module in INSTALLED_TOP_LEVEL_MODULES:
+        assert importlib.util.find_spec(module) is not None, module
 
 
 def test_every_declared_operation_is_wrapped():

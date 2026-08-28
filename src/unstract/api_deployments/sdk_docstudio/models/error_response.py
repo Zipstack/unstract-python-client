@@ -2,53 +2,74 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 
-from ..types import UNSET, Unset
+from ..models.error_type import ErrorType, check_error_type
+
+if TYPE_CHECKING:
+    from ..models.error_detail import ErrorDetail
+
 
 T = TypeVar("T", bound="ErrorResponse")
 
 
 @_attrs_define
 class ErrorResponse:
-    """
-    Attributes:
-        message (Any | Unset):
-        status (str | Unset):
+    """The body of a rejected request.
+
+    Produced by the project-wide exception handler, so its shape is the same
+    for every failure listed against an operation.
+
+        Attributes:
+            errors (list[ErrorDetail]):
+            type_ (ErrorType): * `validation_error` - validation_error
+                * `client_error` - client_error
+                * `server_error` - server_error
     """
 
-    message: Any | Unset = UNSET
-    status: str | Unset = UNSET
+    errors: list[ErrorDetail]
+    type_: ErrorType
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        message = self.message
+        errors = []
+        for errors_item_data in self.errors:
+            errors_item = errors_item_data.to_dict()
+            errors.append(errors_item)
 
-        status = self.status
+        type_: str = self.type_
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
-        field_dict.update({})
-        if message is not UNSET:
-            field_dict["message"] = message
-        if status is not UNSET:
-            field_dict["status"] = status
+        field_dict.update(
+            {
+                "errors": errors,
+                "type": type_,
+            }
+        )
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        d = dict(src_dict)
-        message = d.pop("message", UNSET)
+        from ..models.error_detail import ErrorDetail
 
-        status = d.pop("status", UNSET)
+        d = dict(src_dict)
+        errors = []
+        _errors = d.pop("errors")
+        for errors_item_data in _errors:
+            errors_item = ErrorDetail.from_dict(errors_item_data)
+
+            errors.append(errors_item)
+
+        type_ = check_error_type(d.pop("type"))
 
         error_response = cls(
-            message=message,
-            status=status,
+            errors=errors,
+            type_=type_,
         )
 
         error_response.additional_properties = d

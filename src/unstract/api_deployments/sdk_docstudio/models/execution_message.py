@@ -22,28 +22,30 @@ class ExecutionMessage:
     results.
 
         Attributes:
-            error (str):
             execution_id (str):
             execution_status (str):
-            status_api (str):
+            error (None | str | Unset):
             result (list[FileResult] | None | Unset):
+            status_api (None | str | Unset):
     """
 
-    error: str
     execution_id: str
     execution_status: str
-    status_api: str
+    error: None | str | Unset = UNSET
     result: list[FileResult] | None | Unset = UNSET
+    status_api: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        error = self.error
-
         execution_id = self.execution_id
 
         execution_status = self.execution_status
 
-        status_api = self.status_api
+        error: None | str | Unset
+        if isinstance(self.error, Unset):
+            error = UNSET
+        else:
+            error = self.error
 
         result: list[dict[str, Any]] | None | Unset
         if isinstance(self.result, Unset):
@@ -57,18 +59,26 @@ class ExecutionMessage:
         else:
             result = self.result
 
+        status_api: None | str | Unset
+        if isinstance(self.status_api, Unset):
+            status_api = UNSET
+        else:
+            status_api = self.status_api
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
             {
-                "error": error,
                 "execution_id": execution_id,
                 "execution_status": execution_status,
-                "status_api": status_api,
             }
         )
+        if error is not UNSET:
+            field_dict["error"] = error
         if result is not UNSET:
             field_dict["result"] = result
+        if status_api is not UNSET:
+            field_dict["status_api"] = status_api
 
         return field_dict
 
@@ -77,13 +87,18 @@ class ExecutionMessage:
         from ..models.file_result import FileResult
 
         d = dict(src_dict)
-        error = d.pop("error")
-
         execution_id = d.pop("execution_id")
 
         execution_status = d.pop("execution_status")
 
-        status_api = d.pop("status_api")
+        def _parse_error(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        error = _parse_error(d.pop("error", UNSET))
 
         def _parse_result(data: object) -> list[FileResult] | None | Unset:
             if data is None:
@@ -107,12 +122,21 @@ class ExecutionMessage:
 
         result = _parse_result(d.pop("result", UNSET))
 
+        def _parse_status_api(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        status_api = _parse_status_api(d.pop("status_api", UNSET))
+
         execution_message = cls(
-            error=error,
             execution_id=execution_id,
             execution_status=execution_status,
-            status_api=status_api,
+            error=error,
             result=result,
+            status_api=status_api,
         )
 
         execution_message.additional_properties = d

@@ -14,22 +14,27 @@ T = TypeVar("T", bound="FileResult")
 
 @_attrs_define
 class FileResult:
-    """
-    Attributes:
-        file (str):
-        error (None | str | Unset):
-        file_execution_id (str | Unset):
-        metadata (Any | Unset):
-        metrics (Any | Unset):
-        result (Any | Unset):
-        status (str | Unset):
+    """One input document's outcome.
+
+    Every key is present on every item; the ones that depend on the request
+    options or on the outcome are sent as `null` when they do not apply.
+
+        Attributes:
+            file (str):
+            error (None | str | Unset):
+            extracted_text (None | str | Unset): The document's full extracted text. Sent only when the request set
+                `include_extracted_text`.
+            file_execution_id (None | str | Unset):
+            metadata (Any | Unset):
+            result (Any | Unset):
+            status (str | Unset):
     """
 
     file: str
     error: None | str | Unset = UNSET
-    file_execution_id: str | Unset = UNSET
+    extracted_text: None | str | Unset = UNSET
+    file_execution_id: None | str | Unset = UNSET
     metadata: Any | Unset = UNSET
-    metrics: Any | Unset = UNSET
     result: Any | Unset = UNSET
     status: str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -43,11 +48,19 @@ class FileResult:
         else:
             error = self.error
 
-        file_execution_id = self.file_execution_id
+        extracted_text: None | str | Unset
+        if isinstance(self.extracted_text, Unset):
+            extracted_text = UNSET
+        else:
+            extracted_text = self.extracted_text
+
+        file_execution_id: None | str | Unset
+        if isinstance(self.file_execution_id, Unset):
+            file_execution_id = UNSET
+        else:
+            file_execution_id = self.file_execution_id
 
         metadata = self.metadata
-
-        metrics = self.metrics
 
         result = self.result
 
@@ -62,12 +75,12 @@ class FileResult:
         )
         if error is not UNSET:
             field_dict["error"] = error
+        if extracted_text is not UNSET:
+            field_dict["extracted_text"] = extracted_text
         if file_execution_id is not UNSET:
             field_dict["file_execution_id"] = file_execution_id
         if metadata is not UNSET:
             field_dict["metadata"] = metadata
-        if metrics is not UNSET:
-            field_dict["metrics"] = metrics
         if result is not UNSET:
             field_dict["result"] = result
         if status is not UNSET:
@@ -89,11 +102,25 @@ class FileResult:
 
         error = _parse_error(d.pop("error", UNSET))
 
-        file_execution_id = d.pop("file_execution_id", UNSET)
+        def _parse_extracted_text(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        extracted_text = _parse_extracted_text(d.pop("extracted_text", UNSET))
+
+        def _parse_file_execution_id(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        file_execution_id = _parse_file_execution_id(d.pop("file_execution_id", UNSET))
 
         metadata = d.pop("metadata", UNSET)
-
-        metrics = d.pop("metrics", UNSET)
 
         result = d.pop("result", UNSET)
 
@@ -102,9 +129,9 @@ class FileResult:
         file_result = cls(
             file=file,
             error=error,
+            extracted_text=extracted_text,
             file_execution_id=file_execution_id,
             metadata=metadata,
-            metrics=metrics,
             result=result,
             status=status,
         )

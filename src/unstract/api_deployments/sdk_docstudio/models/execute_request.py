@@ -23,8 +23,10 @@ class ExecuteRequest:
         Attributes:
             custom_data (Any | Unset):
             files (list[File] | Unset):
-            hitl_packet_id (None | str | Unset):
-            hitl_queue_name (None | str | Unset):
+            hitl_packet_id (None | str | Unset): Groups documents reviewed together into one packet. Requires the enterprise
+                manual-review capability; an installation without it rejects the request with 400.
+            hitl_queue_name (None | str | Unset): Document class name for the manual review queue. Requires the enterprise
+                manual-review capability; an installation without it rejects the request with 400.
             include_extracted_text (bool | Unset):  Default: False.
             include_metadata (bool | Unset):  Default: False.
             include_metrics (bool | Unset):  Default: False.

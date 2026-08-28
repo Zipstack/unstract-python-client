@@ -7,9 +7,22 @@
 #
 # The spec itself is produced by the backend that serves these endpoints
 # (`manage.py generate_docstudio_spec`); refresh it from there rather than
-# editing it here.
+# editing it here, and move SPEC_SOURCE below in the same commit.
 #
-#   ./tools/gen_sdk.sh && git diff --stat src/unstract/api_deployments/sdk_docstudio
+# `git add -N` first: a diff alone cannot see a file the generator has newly
+# created, which is exactly what a spec growing an endpoint does.
+#
+#   ./tools/gen_sdk.sh \
+#     && git add -N -- src/unstract/api_deployments/sdk_docstudio \
+#     && git diff --stat -- src/unstract/api_deployments/sdk_docstudio
+#
+# Where specs/docstudio-oss.json was copied from. Without a revision recorded,
+# nothing distinguishes a current copy from one the backend has moved past, and
+# both this script and the drift gate report clean either way.
+#
+#   SPEC_SOURCE: Zipstack/unstract specs/docstudio-oss.json
+#                @ eddd4b746765c77a3d6f64b428fd35d2261e60e7
+#                sha256 e453d4f7444d3757a24a1da73373b11c3d362ceb2d7e13e8658a5b3c068b86f5
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

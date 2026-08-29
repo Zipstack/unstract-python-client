@@ -13,8 +13,10 @@ rather than edited case by case until it passes.
 
 Differences from the baseline that are accepted rather than fixed are asserted
 here explicitly, each in the test that would otherwise be blind to it — the
-``User-Agent``, the per-part ``Content-Type`` on form fields, and the error text
-now reported for non-2xx bodies the baseline dropped.
+``User-Agent``, the per-part ``Content-Type`` on form fields, the error text now
+reported for non-2xx bodies the baseline dropped, the retry boundary moving from
+a timeout of exactly zero to at or below zero, and the exception class a
+malformed deployment URL raises.
 """
 
 import ast
@@ -47,6 +49,7 @@ from requests.exceptions import (
     TooManyRedirects,
 )
 
+from unstract import api_deployments
 from unstract.api_deployments.client import (
     _EXECUTE_SEND_ONLY,
     _STATUS_SEND_ONLY,
@@ -59,6 +62,8 @@ BASELINE_VERSION = "1.5.3"
 BASELINE_PATH = Path(__file__).parent / "baseline" / "client_1_5_3.py"
 BASELINE_SHA256 = "45201bb0de000e8f3a0e65f40cb0b08fec389514f7a17c8bb3410a3dc59229df"
 SPEC_PATH = Path(__file__).parents[1] / "specs" / "docstudio-oss.json"
+#: The one place the vendored spec's provenance is recorded.
+GENERATOR_PATH = Path(__file__).parents[1] / "tools" / "gen_sdk.sh"
 
 API_URL = "https://api.example.com/deployment/api/testorg/testapi/"
 STATUS_ENDPOINT = "/deployment/api/testorg/testapi/?execution_id=exec-123"
@@ -66,6 +71,24 @@ STATUS_ENDPOINT = "/deployment/api/testorg/testapi/?execution_id=exec-123"
 #: Operations the facade wraps. The spec declares exactly these, and a new one
 #: has to be added here deliberately rather than arriving unnoticed.
 WRAPPED_OPERATIONS = frozenset({"execute", "status"})
+
+#: Every accepted divergence from the baseline, named as the module docstring
+#: names it. A divergence pinned by a test but missing from that list is only
+#: findable by reading all of them.
+ACCEPTED_DIVERGENCES = (
+    "User-Agent",
+    "Content-Type",
+    "error text",
+    "retry boundary",
+    "exception class",
+)
+
+
+def test_the_accepted_divergences_are_all_listed_up_front():
+    """Each one is asserted in the test that would otherwise be blind to it, but
+    that only makes it deliberate — the list is what makes it findable."""
+    for phrase in ACCEPTED_DIVERGENCES:
+        assert phrase in (__doc__ or ""), phrase
 
 
 def _load_baseline():
@@ -172,7 +195,7 @@ def test_transport_errors_are_translated(raised, expected):
 @pytest.mark.parametrize(
     ("api_url", "expected"),
     [
-        ("::::", APIDeploymentsClientException),
+        ("::::", MissingSchema),
         ("/deployment/api/testorg/testapi/", MissingSchema),
         # Parity: the released client raised this one too.
         ("http://[bad", ValueError),
@@ -183,11 +206,10 @@ def test_a_malformed_deployment_url_raises_the_class_this_client_chose(
 ):
     """A deliberate divergence, pinned here so it stays deliberate.
 
-    The released client answered the first two with ``InvalidSchema``, which said
-    nothing about which URL was wrong. This is a configuration typo that never
-    reaches the wire, so the clearer class is worth the difference -- but a
-    caller wrapping construction in ``except RequestException`` no longer catches
-    the first, which is the part that has to be visible.
+    The released client answered the first two with ``InvalidSchema``. Both
+    reach the transport here and come back as ``MissingSchema``, which names
+    what is actually wrong -- a different class, but the same
+    ``RequestException`` a caller wrapping construction already catches.
     """
     with pytest.raises(expected) as caught:
         client = _client(api_url=api_url)
@@ -1059,10 +1081,49 @@ def test_transport_timeout_bounds_a_stalled_connection():
         server.close()
 
 
-def test_deployment_route_rejects_an_unusable_url():
-    client = _client(api_url="https://api.example.com/onlyone")
+@pytest.mark.parametrize(
+    "api_url", ["https://gw.example.com/extract/", "https://api.example.com/onlyone"]
+)
+def test_a_deployment_url_with_no_route_in_it_is_still_polled(api_url):
+    """Deriving the route is only load-bearing where the deployment URL carries
+    the spec route as a suffix. A URL too short to have an organisation and API
+    name in it -- an ingress rewrite -- takes the branch that reads the endpoint
+    the service returned, which is the one the released client polled.
+
+    Submitting on these already works, so refusing to poll them strands an
+    execution that has been paid for.
+    """
+    client = _client(api_url=api_url)
     with pytest.raises(APIDeploymentsClientException):
         _ = client._deployment_route
+
+    with patch.object(APIDeploymentsClient, "_send") as mock_send:
+        mock_send.return_value = _httpx_response(200, {"status": "COMPLETED"})
+        ours = client.check_execution_status(STATUS_ENDPOINT)
+
+    with patch.object(baseline, "requests") as mock_requests:
+        mock_requests.request.return_value = _requests_response(
+            200, {"status": "COMPLETED"}
+        )
+        theirs = _baseline_client(api_url=api_url).check_execution_status(
+            STATUS_ENDPOINT
+        )
+
+    assert ours == theirs
+
+    args, kwargs = mock_send.call_args
+    sent = httpx.URL(client.base_url).join(args[1]).copy_merge_params(kwargs["params"])
+    published = urlparse(client.base_url + STATUS_ENDPOINT)
+    assert args[0].lower() == "get"
+    assert (sent.scheme, sent.host, sent.path) == (
+        published.scheme,
+        published.hostname,
+        published.path,
+    )
+    assert parse_qs(str(sent.params)) == {
+        **parse_qs(published.query),
+        "include_metadata": [str(client.include_metadata)],
+    }
 
 
 @pytest.mark.parametrize(
@@ -1216,13 +1277,21 @@ def test_an_unreadable_file_raises_the_documented_exception(tmp_path, sample_fil
     assert opened and all(handle.closed for handle in opened)
 
 
-# Error shapes the API answers with. The handler-routed statuses answer with
-# drf-standardized-errors; a few are still built by hand. The baseline read the
-# reason out of neither, so a caller saw an empty error next to a status code —
-# an accepted difference from parity, and the reason for these tests.
+# Error shapes the API answers with, each one a body the service actually
+# builds. Two families coexist on these endpoints and the spec models both: the
+# statuses routed through the project's exception handler answer with
+# ``{"type", "errors": [{"code", "detail", "attr"}]}``, while the ones the views
+# build by hand answer in the endpoint's own envelope -- ``{"message": {...}}``
+# on execute, ``{"status", "message"}`` on the status endpoint. The baseline read
+# the reason out of neither, so a caller saw an empty error next to a status
+# code -- an accepted difference from parity, and the reason for these tests.
+#
+# Which family a status answers with is a property of the status, not of the
+# endpoint, so a case belongs to whichever operation reaches it.
 ERROR_BODY_CASES = [
     (
-        "standardized",
+        "validation",
+        "execute",
         400,
         {
             "type": "validation_error",
@@ -1237,7 +1306,8 @@ ERROR_BODY_CASES = [
         "Queue 'nope' does not exist",
     ),
     (
-        "standardized_multiple",
+        "validation_multiple",
+        "execute",
         400,
         {
             "type": "validation_error",
@@ -1249,54 +1319,122 @@ ERROR_BODY_CASES = [
         "first; second",
     ),
     (
-        "hand_built",
-        404,
-        {"status": "ERROR", "message": "API deployment not found"},
-        "API deployment not found",
+        "unauthorized",
+        "execute",
+        401,
+        {
+            "type": "client_error",
+            "errors": [{"code": "error", "detail": "Unauthorized", "attr": None}],
+        },
+        "Unauthorized",
     ),
-    ("unauthorized", 401, {"errors": [{"detail": "Invalid token"}]}, "Invalid token"),
+    (
+        "not_found",
+        "status",
+        404,
+        {
+            "type": "client_error",
+            "errors": [
+                {
+                    "code": "error",
+                    "detail": "Execution with ID 'exec-123' does not exist.",
+                    "attr": None,
+                }
+            ],
+        },
+        "Execution with ID 'exec-123' does not exist.",
+    ),
+    (
+        "hand_built_acknowledged",
+        "status",
+        406,
+        {"status": "COMPLETED", "message": "Result already acknowledged"},
+        "Result already acknowledged",
+    ),
+    (
+        "hand_built_execution_failed",
+        "execute",
+        422,
+        {
+            "message": {
+                "execution_id": "exec-123",
+                "execution_status": "ERROR",
+                "error": "Tool run failed",
+                "result": None,
+            }
+        },
+        "Tool run failed",
+    ),
 ]
 
-#: Bodies carrying nothing readable. Neither shape may crash, and the body
-#: itself is more use to a caller than an empty string.
+#: Bodies carrying nothing readable, which is what a proxy or gateway in front
+#: of the service answers with -- the application's own two families always
+#: carry one. Neither may crash, and the body itself is more use to a caller
+#: than an empty string.
 UNREADABLE_ERROR_BODIES = [
-    ("no_detail", 409, {"type": "conflict", "errors": []}),
+    ("no_detail", 500, {"type": "server_error", "errors": []}),
     ("a_list", 502, [1, 2]),
     ("a_string", 403, "forbidden"),
 ]
 
 
+def _report(operation, status_code, body, sample_file=None):
+    with patch.object(APIDeploymentsClient, "_send") as mock_send:
+        mock_send.return_value = _httpx_response(status_code, body)
+        if operation == "execute":
+            return _client(api_timeout=300).structure_file([sample_file])
+        return _client().check_execution_status(STATUS_ENDPOINT)
+
+
 @pytest.mark.parametrize(
-    ("name", "status_code", "body", "expected"),
+    ("name", "operation", "status_code", "body", "expected"),
     ERROR_BODY_CASES,
     ids=[c[0] for c in ERROR_BODY_CASES],
 )
-def test_structure_file_reports_the_reason_an_error_carries(
-    sample_file, name, status_code, body, expected
+def test_the_reason_an_error_carries_is_reported(
+    sample_file, name, operation, status_code, body, expected
 ):
-    with patch.object(APIDeploymentsClient, "_send") as mock_send:
-        mock_send.return_value = _httpx_response(status_code, body)
-        result = _client(api_timeout=300).structure_file([sample_file])
+    """The facade reads these as raw dicts on purpose. The generated models are
+    built per declared status and per declared shape, and the two families above
+    put the reason in different places, so bridging them is the facade's job and
+    a model can only ever cover one side of it."""
+    result = _report(operation, status_code, body, sample_file)
 
     assert result["error"] == expected
     assert result["status_code"] == status_code
     assert result["pending"] is False
+    # The reason is not also handed back as an extraction: one of these shapes
+    # carries it under the key a success puts the result under.
+    assert result["extraction_result"] in ("", None)
 
 
-@pytest.mark.parametrize(
-    ("name", "status_code", "body", "expected"),
-    ERROR_BODY_CASES,
-    ids=[c[0] for c in ERROR_BODY_CASES],
-)
-def test_check_execution_status_reports_the_reason_an_error_carries(
-    name, status_code, body, expected
-):
-    with patch.object(APIDeploymentsClient, "_send") as mock_send:
-        mock_send.return_value = _httpx_response(status_code, body)
-        result = _client().check_execution_status(STATUS_ENDPOINT)
+def test_both_calls_are_covered_by_the_error_bodies_above():
+    """A shape belongs to whichever operation reaches it, so the table only
+    exercises both readers while it names both."""
+    assert {case[1] for case in ERROR_BODY_CASES} == WRAPPED_OPERATIONS
 
-    assert result["error"] == expected
-    assert result["status_code"] == status_code
+
+def test_an_execution_that_failed_without_a_reason_is_not_given_one(sample_file):
+    """Both endpoints can answer a non-2xx with their own envelope and no reason
+    in it -- a failed execution whose per-file entries carry the detail. The
+    envelope has already been read, so nothing is invented out of the raw body
+    the way a refused request needs."""
+    body = {
+        "message": {
+            "execution_id": "exec-123",
+            "execution_status": "ERROR",
+            "error": "",
+            "result": None,
+        }
+    }
+    ours = _report("execute", 422, body, sample_file)
+
+    with patch.object(baseline, "requests") as mock_requests:
+        mock_requests.post.return_value = _requests_response(422, body)
+        theirs = _baseline_client(api_timeout=300).structure_file([sample_file])
+
+    assert ours == theirs
+    assert ours["error"] == ""
 
 
 @pytest.mark.parametrize(
@@ -1338,12 +1476,12 @@ def _declared_responses(operation_id: str) -> dict[int, str]:
     raise AssertionError(f"{operation_id} not declared in the spec")
 
 
-def _body_for(schema: str) -> dict:
-    """A response body of the shape the spec declares, for an error status.
+def _body_for(schema: str) -> tuple[dict, str]:
+    """A body of the shape the spec declares, and the reason a caller gets back.
 
     Built from the schema name rather than hardcoded per status, so a spec that
-    re-points a status at the other error shape is exercised as the new shape
-    without this table being touched.
+    re-points a status at another shape is exercised as the new shape without
+    this table being touched.
     """
     if schema == "ErrorResponse":
         return {
@@ -1351,10 +1489,35 @@ def _body_for(schema: str) -> dict:
             # `code` is free-form here, deliberately not an enum: the server
             # emits "error" for statuses the handler routes without a subtype.
             "errors": [{"code": "error", "detail": "the reason", "attr": None}],
-        }
-    # The shapes still built by hand: 406 acknowledges, 422/500 report setup
-    # failures through the same envelope a success uses.
-    return {"status": "ERROR", "message": "the reason"}
+        }, "the reason"
+    if schema == "ExecuteResponse":
+        return {
+            "message": {
+                "execution_id": "exec-123",
+                "execution_status": "ERROR",
+                "error": "the reason",
+                "result": None,
+            }
+        }, "the reason"
+    if schema == "AcknowledgedResponse":
+        return {"status": "COMPLETED", "message": "the reason"}, "the reason"
+    # StatusResponse. The status endpoint's own envelope carries per-file
+    # results, never a reason: on these statuses the execution's state is the
+    # answer, and any reason is inside a file's own entry.
+    return {"status": "ERROR", "message": [{"file": "a.pdf", "error": "boom"}]}, ""
+
+
+#: Every error status each operation declares, pinned. Read straight off the
+#: spec, the coverage below shrinks in silence when the spec stops declaring one
+#: -- which is the direction that costs a caller an unreported status.
+DECLARED_ERROR_STATUSES = {
+    "execute": {400, 401, 403, 404, 413, 422, 429, 500, 502, 504},
+    "status": {400, 401, 403, 404, 406, 422, 500},
+}
+
+#: Statuses the client does something bespoke for -- ``Retry-After`` on 429, a
+#: retry on each of the 5xx the deployment answers with.
+SPECIAL_CASED_STATUSES = {429, 500, 502, 504}
 
 
 @pytest.mark.parametrize("operation", sorted(WRAPPED_OPERATIONS))
@@ -1362,18 +1525,19 @@ def test_every_error_status_the_spec_declares_is_reported(sample_file, operation
     """The spec and this client have to agree on the error body, and they
     disagreed once: the facade read one shape while the spec declared another.
 
-    Both shapes are declared now, both are read here, and a status the spec adds
-    arrives as a case rather than as an empty ``error`` in production.
+    Every declared shape is read here, and a status the spec adds arrives as a
+    case rather than as an empty ``error`` in production. A status it drops
+    fails the manifest above instead of quietly leaving this loop.
     """
     declared = _declared_responses(operation)
     errors = {code: schema for code, schema in declared.items() if code != 200}
-    assert errors, operation
-    # Both shapes are actually in play; a regression to one of them is a
+    assert set(errors) == DECLARED_ERROR_STATUSES[operation], operation
+    # Both families are actually in play; a regression to one of them is a
     # narrowing this would otherwise not notice.
     assert set(errors.values()) > {"ErrorResponse"}
 
     for status_code, schema in errors.items():
-        body = _body_for(schema)
+        body, expected = _body_for(schema)
         with patch.object(APIDeploymentsClient, "_send") as mock_send:
             mock_send.return_value = _httpx_response(status_code, body)
             if operation == "execute":
@@ -1382,7 +1546,16 @@ def test_every_error_status_the_spec_declares_is_reported(sample_file, operation
                 result = _client().check_execution_status(STATUS_ENDPOINT)
 
         assert result["status_code"] == status_code, (operation, status_code)
-        assert result["error"] == "the reason", (operation, status_code, schema)
+        assert result["error"] == expected, (operation, status_code, schema)
+
+
+def test_the_statuses_the_client_handles_specially_are_declared():
+    """A status carrying dedicated handling that no operation declares is either
+    dead code here or a gap in the spec, and nothing else would say which."""
+    client = _client()
+    assert all(client._is_retryable_status(code) for code in SPECIAL_CASED_STATUSES)
+    declared = set().union(*DECLARED_ERROR_STATUSES.values())
+    assert SPECIAL_CASED_STATUSES <= declared
 
 
 def test_the_generated_models_read_the_bodies_the_server_sends():
@@ -1395,7 +1568,7 @@ def test_the_generated_models_read_the_bodies_the_server_sends():
         FileResult,
     )
 
-    error = ErrorResponse.from_dict(_body_for("ErrorResponse"))
+    error = ErrorResponse.from_dict(_body_for("ErrorResponse")[0])
     assert [detail.detail for detail in error.errors] == ["the reason"]
     assert error.type_ == "client_error"
     assert not error.additional_properties
@@ -1407,13 +1580,40 @@ def test_the_generated_models_read_the_bodies_the_server_sends():
     )
     assert message.error is UNSET and message.status_api is UNSET
 
+    # `metrics` is not a field here and should not be: `include_metrics` turns
+    # it on inside the untyped `result` payload, which the spec declares as
+    # opaque, so it never reached the top level of a file result.
     result = FileResult.from_dict(
-        {"file": "a.pdf", "status": "SUCCESS", "extracted_text": "hello"}
+        {
+            "file": "a.pdf",
+            "status": "SUCCESS",
+            "extracted_text": "hello",
+            "result": {"output": {}, "metrics": {"elapsed": 1}},
+        }
     )
     assert result.extracted_text == "hello"
+    assert result.result["metrics"] == {"elapsed": 1}
     assert not result.additional_properties
-    # Dropped from the spec: the server never sent it.
     assert not hasattr(result, "metrics")
+
+
+def test_the_custom_data_round_trip_is_documented_as_undeclared():
+    """``structure_file`` documents ``custom_data`` coming back under each result
+    item's ``metadata.custom_data``. That is what the service does, and it is
+    worth documenting -- but the spec carries the field on the request only, so
+    nothing here pins the round trip and the docstring has to say so."""
+    schemas = json.loads(SPEC_PATH.read_text())["components"]["schemas"]
+    assert "custom_data" in schemas["ExecuteRequest"]["properties"]
+    assert not any(
+        "custom_data" in schema.get("properties", {})
+        for name, schema in schemas.items()
+        if name != "ExecuteRequest"
+    )
+
+    doc = inspect.getdoc(APIDeploymentsClient.structure_file)
+    claim = doc[doc.index("custom_data (Any)") :]
+    assert "metadata.custom_data" in claim
+    assert "not declared" in claim
 
 
 def test_a_success_envelope_is_never_read_as_an_error(sample_file):
@@ -1462,13 +1662,25 @@ def test_structure_file_closes_its_handles(sample_file):
     assert opened and all(handle.closed for handle in opened)
 
 
+#: What the status endpoint answers with, in the shape it builds them: the
+#: execution's state plus its per-file results, and 200 only once the execution
+#: has completed -- an in-progress poll is a 422 carrying the same envelope. The
+#: reason a failed execution carries lives in a file's own entry, not beside the
+#: envelope, so none of these is read as a refused request.
 STATUS_CASES = [
-    ("completed", 200, {"status": "COMPLETED", "message": [{"file": "a"}]}),
-    ("executing", 200, {"status": "EXECUTING", "message": ""}),
-    ("queued", 200, {"status": "QUEUED", "message": ""}),
-    ("error", 200, {"status": "ERROR", "error": "boom", "message": ""}),
-    ("already_acknowledged", 406, {"status": "", "error": "already acknowledged"}),
-    ("server_error", 500, {"status": "", "error": "oops"}),
+    ("completed", 200, {"status": "COMPLETED", "message": [{"file": "a.pdf"}]}),
+    ("executing", 422, {"status": "EXECUTING", "message": None}),
+    ("queued", 422, {"status": "QUEUED", "message": None}),
+    (
+        "error",
+        422,
+        {"status": "ERROR", "message": [{"file": "a.pdf", "error": "boom"}]},
+    ),
+    (
+        "tool_not_found",
+        500,
+        {"status": "ERROR", "message": [{"file": "a.pdf", "error": "no such tool"}]},
+    ),
 ]
 
 
@@ -1603,11 +1815,20 @@ def test_module_level_names_are_unchanged():
 INSTALLED_CONSOLE_SCRIPTS: dict[str, str] = {}
 INSTALLED_TOP_LEVEL_MODULES = {"unstract.api_deployments", "unstract.clone"}
 
+#: What the released baseline's install put on the path. Everything the wheel
+#: ships comes from ``src/unstract``, and this is smaller now.
+BASELINE_CONSOLE_SCRIPTS = {"unstract": "unstract.cli:main"}
+
 
 def test_the_packaging_surface_is_what_it_claims():
     """The wire behaviour above is all pinned against the baseline and stays
     green through a console script being deleted, which is the one published
-    contract this change does break."""
+    contract this change does break.
+
+    Every entry under ``src/unstract`` counts, not just the packages: the build
+    ships the directory whole, so a top-level module dropped beside them is
+    installed as ``unstract.<name>`` without appearing as a package at all.
+    """
     pyproject = tomllib.loads(
         (Path(__file__).parents[1] / "pyproject.toml").read_text()
     )
@@ -1615,14 +1836,39 @@ def test_the_packaging_surface_is_what_it_claims():
 
     src = Path(__file__).parents[1] / "src" / "unstract"
     packaged = {
-        f"unstract.{path.name}"
+        f"unstract.{path.stem}"
         for path in src.iterdir()
-        if (path / "__init__.py").exists()
+        if path.name != "__pycache__"
+        and (path.is_dir() or path.suffix in {".py", ".pyi"})
     }
     assert packaged == INSTALLED_TOP_LEVEL_MODULES
 
     for module in INSTALLED_TOP_LEVEL_MODULES:
         assert importlib.util.find_spec(module) is not None, module
+
+
+def test_a_shrinking_packaging_surface_cannot_ship_as_a_patch():
+    """The release workflow does not publish the version recorded here: it reads
+    it as the last released one and applies the bump chosen at dispatch. So this
+    still reads the baseline's version until a release runs, and once one does,
+    a surface smaller than that baseline's cannot have been published as a patch
+    over it.
+    """
+    assert set(BASELINE_CONSOLE_SCRIPTS) - set(INSTALLED_CONSOLE_SCRIPTS)
+
+    ours = tuple(int(part) for part in api_deployments.__version__.split("."))
+    theirs = tuple(int(part) for part in BASELINE_VERSION.split("."))
+    assert ours >= theirs
+    assert ours == theirs or ours[:2] > theirs[:2], api_deployments.__version__
+
+
+def test_the_vendored_spec_is_the_revision_the_generator_pins():
+    """The provenance pin is a comment, and a comment is enforced by nothing: a
+    spec edited in place goes on claiming the upstream revision it is no longer
+    a copy of, and the drift gate reports clean either way."""
+    pinned = re.search(r"sha256 ([0-9a-f]{64})", GENERATOR_PATH.read_text())
+    assert pinned, GENERATOR_PATH
+    assert hashlib.sha256(SPEC_PATH.read_bytes()).hexdigest() == pinned.group(1)
 
 
 def test_every_declared_operation_is_wrapped():

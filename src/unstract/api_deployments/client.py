@@ -139,13 +139,16 @@ _ERROR_TEXT_LIMIT = 500
 
 
 def _error_text(body: Any, response) -> str:
-    """The reason a non-2xx carries, in whichever shape the service used.
+    """The reason a non-2xx carries, for a body that is not the endpoint's own
+    envelope.
 
-    Statuses raised through the API's exception handler answer with
-    ``{"type", "errors": [{"code", "detail", "attr"}]}``; the few built by hand
-    answer with ``{"status", "message"}``. Neither is the success envelope the
-    result fields are read out of, so without this the server's reason is
-    dropped and the caller sees an empty error next to a bare status code.
+    A refused request answers through the API's exception handler with
+    ``{"type", "errors": [{"code", "detail", "attr"}]}``. Anything in front of
+    the service -- a proxy, a gateway -- answers however it likes, so a single
+    readable string is looked for before falling back to the body itself.
+    Neither is the envelope the result fields are read out of, so without this
+    the reason is dropped and the caller sees an empty error next to a bare
+    status code.
     """
     if isinstance(body, dict):
         errors = body.get("errors")
@@ -389,7 +392,20 @@ class APIDeploymentsClient:
             )
         return segments[-2], segments[-1]
 
-    def _status_url(self, endpoint: str, path: str) -> str:
+    def _spec_route(self) -> str:
+        """The path the spec routes a poll to, or ``""`` when the deployment URL
+        carries no organisation and API name to build one from.
+
+        Built through the generated builder so it follows the spec rather than a
+        copy of it.
+        """
+        try:
+            org_name, api_name = self._deployment_route
+        except APIDeploymentsClientException:
+            return ""
+        return status._get_kwargs(org_name, api_name, execution_id="")["url"]
+
+    def _status_url(self, endpoint: str) -> str:
         """Absolute URL to poll, under the deployment's own path prefix.
 
         ``base_url`` is scheme and host only, so a deployment served under a path
@@ -400,10 +416,16 @@ class APIDeploymentsClient:
         a guessed path polls nothing, and the execution behind it has already
         been paid for.
 
+        A deployment URL with no organisation and API name in it -- an ingress
+        rewrite short enough to have neither -- has no route to line up against
+        and takes that same branch. The released client polled those, and the
+        execution has already been submitted by the time this runs.
+
         Only the path is taken. A scheme and host in the reply would otherwise
         decide where the deployment key is sent, and the reply is not the thing
         that gets to choose that.
         """
+        path = self._spec_route()
         route = path.rstrip("/")
         prefix = urlparse(self.api_url).path.rstrip("/")
         if route and prefix.endswith(route):
@@ -583,9 +605,12 @@ class APIDeploymentsClient:
             hitl_queue_name (str): Human-in-the-loop queue to route the file to.
             hitl_packet_id (str): Human-in-the-loop packet to attach the file to.
             presigned_urls (list[str]): URLs to fetch the inputs from.
-            custom_data (Any): Arbitrary JSON, returned under each result
-                item's ``metadata.custom_data``. Anything that is not already a
-                string is serialised to JSON before it is sent.
+            custom_data (Any): Arbitrary JSON. The service returns it under
+                each result item's ``metadata.custom_data``, which is server
+                behaviour: the spec carries the field on the request only, so
+                the round trip is not declared and nothing here pins it.
+                Anything that is not already a string is serialised to JSON
+                before it is sent.
 
         Returns:
             dict: The response from the API.
@@ -732,7 +757,15 @@ class APIDeploymentsClient:
         error_message = response_message.get("error", "")
         extraction_result = response_message.get("result", "")
         status_api_endpoint = response_message.get("status_api")
-        if not error_message and not 200 <= response.status_code < 300:
+        if (
+            not error_message
+            and not response_message
+            and not 200 <= response.status_code < 300
+        ):
+            # Only a refused request needs this. A body carrying the endpoint's
+            # own envelope has already been read for its reason above, and a
+            # non-2xx that still carries one is reporting an execution state
+            # rather than refusing the request.
             error_message = _error_text(response_data, response)
 
         obj_to_return = {
@@ -797,10 +830,13 @@ class APIDeploymentsClient:
         requested = {k: v for k, v in requested.items() if not isinstance(v, Unset)}
         params = {"include_metadata": self.include_metadata, **requested}
 
-        org_name, api_name = self._deployment_route
+        # Placeholders: the generated builder only spends these on the URL, and
+        # ``_status_url`` derives its own. Requiring a route here would refuse to
+        # poll deployment URLs the released client polled, after the execution
+        # behind them has already been submitted.
         request_kwargs = status._get_kwargs(
-            org_name,
-            api_name,
+            "",
+            "",
             execution_id=_query_value(status_check_api_endpoint, "execution_id"),
             **params,
         )
@@ -818,9 +854,10 @@ class APIDeploymentsClient:
                 if k in send_only
             },
         }
+        request_kwargs.pop("url")
         response = self._request_with_retry(
             request_kwargs.pop("method"),
-            self._status_url(status_check_api_endpoint, request_kwargs.pop("url")),
+            self._status_url(status_check_api_endpoint),
             **request_kwargs,
         )
         self.logger.debug(response.status_code)
@@ -850,10 +887,19 @@ class APIDeploymentsClient:
         error_message = body.get("error", "")
         extraction_result = body.get("message", "")
         if not error_message and not 200 <= response.status_code < 300:
-            # The reason lives outside the fields read above in both shapes the
-            # API answers errors with, so without this a failed poll is
-            # indistinguishable from a finished-and-empty one.
-            error_message = _error_text(response_data, response)
+            if "status" in body:
+                # The endpoint's own envelope. A non-2xx here reports an
+                # execution state, not a refused request, and the only reason it
+                # carries is a message that is text where a result would be a
+                # list. Left under both keys a caller reads the error back as an
+                # extraction.
+                if isinstance(extraction_result, str) and extraction_result:
+                    error_message, extraction_result = extraction_result, ""
+            else:
+                # A refused request answers in another shape entirely, and the
+                # reason lives outside the fields read above. Without this a
+                # failed poll is indistinguishable from a finished-and-empty one.
+                error_message = _error_text(response_data, response)
 
         obj_to_return = {
             "status_code": response.status_code,

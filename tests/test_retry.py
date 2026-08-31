@@ -1,6 +1,9 @@
 """Tests for the exponential backoff retry logic in APIDeploymentsClient."""
 
 import io
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -743,3 +746,63 @@ class TestStructureFile422DoesNotSetPending:
         result = c.structure_file([str(test_file)])
         assert result["pending"] is True
         assert result["status_code"] == 200
+
+
+def test_a_retried_upload_replays_the_whole_body(tmp_path):
+    """A retry has to put the same bytes on the wire as the first attempt.
+
+    The multipart body is built from open file handles, which the first
+    attempt reads to EOF. Without a rewind between attempts the retry sends a
+    body missing the file it is uploading -- and no test that stubs the
+    transport can see it, because the encoding is what drops the bytes.
+    """
+    content = b"PDFBYTES" * 512
+    upload = tmp_path / "sample.pdf"
+    upload.write_bytes(content)
+    attempts = []
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):  # noqa: N802 -- the name BaseHTTPRequestHandler dispatches to
+            declared = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(declared)
+            attempts.append((declared, len(body), content in body))
+            first = len(attempts) == 1
+            payload = json.dumps(
+                {"message": "upstream unavailable"}
+                if first
+                else {"message": {"execution_status": "COMPLETED", "result": "ok"}}
+            ).encode()
+            self.send_response(502 if first else 200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    c = APIDeploymentsClient(
+        api_url=f"http://127.0.0.1:{server.server_address[1]}/deploy",
+        api_key="test-key",
+        logging_level="ERROR",
+        max_retries=2,
+        initial_delay=0.01,
+        max_delay=0.02,
+    )
+    try:
+        # Queuing mode: the synchronous mode deliberately does not retry an
+        # upload, so this is the only path a second attempt can be reached on.
+        c.structure_file([str(upload)], timeout=-1)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert len(attempts) == 2, "the 502 was not retried, so nothing was replayed"
+    declared, received, carried_file = attempts[0]
+    assert carried_file
+    assert attempts == [(declared, declared, True)] * 2

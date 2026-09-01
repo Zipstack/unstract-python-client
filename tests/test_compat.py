@@ -56,7 +56,7 @@ from unstract.api_deployments.client import (
     APIDeploymentsClient,
     APIDeploymentsClientException,
 )
-from unstract.api_deployments.sdk_docstudio.types import UNSET
+from unstract.api_deployments._sdk_docstudio.types import UNSET
 
 BASELINE_VERSION = "1.5.3"
 BASELINE_PATH = Path(__file__).parent / "baseline" / "client_1_5_3.py"
@@ -1562,7 +1562,7 @@ def test_the_generated_models_read_the_bodies_the_server_sends():
     """The generated models are an implementation detail, but a wrong one is a
     trap for anyone who imports them: the facade would keep working while the
     models silently lost the payload."""
-    from unstract.api_deployments.sdk_docstudio.models import (
+    from unstract.api_deployments._sdk_docstudio.models import (
         ErrorResponse,
         ExecutionMessage,
         FileResult,

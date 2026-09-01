@@ -13,8 +13,8 @@
 # created, which is exactly what a spec growing an endpoint does.
 #
 #   ./tools/gen_sdk.sh \
-#     && git add -N -- src/unstract/api_deployments/sdk_docstudio \
-#     && git diff --stat -- src/unstract/api_deployments/sdk_docstudio
+#     && git add -N -- src/unstract/api_deployments/_sdk_docstudio \
+#     && git diff --stat -- src/unstract/api_deployments/_sdk_docstudio
 #
 # Where specs/docstudio-oss.json was copied from. Without a revision recorded,
 # nothing distinguishes a current copy from one the backend has moved past, and
@@ -31,7 +31,7 @@ VENV="$REPO/.gen-venv"
 # finds whatever ruff the caller happens to have, or none, and reports the miss
 # as a warning -- which the gate below reads as an unparsable spec.
 export PATH="$VENV/bin:$PATH"
-OUT="src/unstract/api_deployments/sdk_docstudio"
+OUT="src/unstract/api_deployments/_sdk_docstudio"
 # Pinned: unpinned, a generator upgrade and a spec change produce the same diff,
 # and the drift gate can no longer tell them apart.
 GENERATOR="openapi-python-client==0.29.0"

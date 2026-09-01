@@ -70,7 +70,7 @@ lint = [
 line-length = 88
 # Generated and vendored code is overwritten wholesale by its refresh script, so
 # a lint finding there can never be fixed in place.
-extend-exclude = ["src/unstract/api_deployments/sdk_docstudio", "tests/baseline"]
+extend-exclude = ["src/unstract/api_deployments/_sdk_docstudio", "tests/baseline"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]

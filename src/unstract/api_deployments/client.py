@@ -45,10 +45,10 @@ from tenacity import (
 )
 from tenacity.wait import wait_base
 
-from unstract.api_deployments.sdk_docstudio import AuthenticatedClient
-from unstract.api_deployments.sdk_docstudio.api.deployment import execute, status
-from unstract.api_deployments.sdk_docstudio.models import ExecuteRequest
-from unstract.api_deployments.sdk_docstudio.types import UNSET, File, Unset
+from unstract.api_deployments._sdk_docstudio import AuthenticatedClient
+from unstract.api_deployments._sdk_docstudio.api.deployment import execute, status
+from unstract.api_deployments._sdk_docstudio.models import ExecuteRequest
+from unstract.api_deployments._sdk_docstudio.types import UNSET, File, Unset
 from unstract.api_deployments.utils import UnstractUtils
 
 

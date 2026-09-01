@@ -115,7 +115,7 @@ The retry logic uses exponential backoff with full jitter and respects the `Retr
 
 ## Internals
 
-`unstract.api_deployments.sdk_docstudio` is generated from the deployment API's
+`unstract.api_deployments._sdk_docstudio` is generated from the deployment API's
 OpenAPI spec by `tools/gen_sdk.sh` and is an implementation detail of the
 transport. `APIDeploymentsClient` is the supported surface — import from it, not
 from the generated tree, which is regenerated wholesale whenever the spec moves.

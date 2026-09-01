@@ -63,5 +63,5 @@ jobs:
       # newly created, which is exactly what a spec growing an endpoint does.
       - name: Fail if the committed SDK is not what the spec generates
         run: |
-          git add -N -- src/unstract/api_deployments/sdk_docstudio
-          git diff --exit-code -- src/unstract/api_deployments/sdk_docstudio
+          git add -N -- src/unstract/api_deployments/_sdk_docstudio
+          git diff --exit-code -- src/unstract/api_deployments/_sdk_docstudio

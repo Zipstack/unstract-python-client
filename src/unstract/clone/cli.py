@@ -1,8 +1,6 @@
 """Click-based CLI for ``unstract.clone``.
 
-Single ``clone`` command, registered on the top-level ``unstract`` group
-(``unstract.cli``) — the canonical invocation is ``unstract clone``. The
-local group here only backs ``python -m unstract.clone``.
+Single ``clone`` command, invoked as ``python -m unstract.clone clone``.
 
 Platform keys can be passed via flags (``--source-key`` / ``--target-key``)
 or env vars (``UNSTRACT_SRC_PLATFORM_KEY`` / ``UNSTRACT_TGT_PLATFORM_KEY``)

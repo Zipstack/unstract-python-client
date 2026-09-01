@@ -6,6 +6,13 @@ authors = [
     {name = "Zipstack Inc", email = "devsupport@zipstack.com"},
 ]
 dependencies = [
+    # The transport layer is generated against httpx; attrs backs its models.
+    # Upper-bounded because the generated code is written against one minor
+    # series: a bump has to be regenerated and re-tested, not resolved into.
+    "httpx>=0.27,<0.29",
+    "attrs>=23.2",
+    # Still the transport for the `unstract.clone` subpackage, and the source of
+    # the exception classes callers catch by name around the deployment client.
     "requests>=2.32.3",
     "tenacity>=8.2.0",
     "click>=8.1",
@@ -26,9 +33,6 @@ classifiers = [
     "Programming Language :: Python",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-
-[project.scripts]
-unstract = "unstract.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -64,6 +68,9 @@ lint = [
 
 [tool.ruff]
 line-length = 88
+# Generated and vendored code is overwritten wholesale by its refresh script, so
+# a lint finding there can never be fixed in place.
+extend-exclude = ["src/unstract/api_deployments/_sdk_docstudio", "tests/baseline"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]

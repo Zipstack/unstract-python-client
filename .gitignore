@@ -114,6 +114,8 @@ celerybeat.pid
 # Environments
 .env
 .venv
+# Built inside the repo by tools/gen_sdk.sh.
+.gen-venv/
 env/
 venv/
 ENV/

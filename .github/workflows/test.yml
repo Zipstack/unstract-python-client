@@ -14,14 +14,14 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           version: "0.6.14"
           enable-cache: true
@@ -37,3 +37,31 @@ jobs:
 
       - name: Tests (pytest)
         run: uv run pytest tests/ -v
+
+  sdk-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.6.14"
+          enable-cache: true
+
+      # The generated tree is committed, so an edit to it reviews like any
+      # other change and then disappears on the next regeneration. Same for a
+      # spec change that never had the generator run over it.
+      - name: Regenerate from the committed spec
+        run: ./tools/gen_sdk.sh
+
+      # `git add -N` first: a diff alone cannot see a file the generator has
+      # newly created, which is exactly what a spec growing an endpoint does.
+      - name: Fail if the committed SDK is not what the spec generates
+        run: |
+          git add -N -- src/unstract/api_deployments/_sdk_docstudio
+          git diff --exit-code -- src/unstract/api_deployments/_sdk_docstudio

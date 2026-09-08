@@ -55,7 +55,11 @@ Upstream, the spec is produced by the backend that serves these endpoints
    ```bash
    git add -N -- src/unstract/api_deployments/_sdk_docstudio
    git diff --stat -- src/unstract/api_deployments/_sdk_docstudio
+   git diff -- src/unstract/api_deployments/_sdk_docstudio
    ```
+
+   The `--stat` is the shape of the change; the full diff is the change. Read
+   both — the operations and fields that moved only show up in the second.
 
    `git add -N` first because a plain diff cannot see a file the generator has
    newly created — which is precisely what a spec that grew an endpoint
@@ -81,8 +85,10 @@ fail the same way. If it is red, run step 3 and commit the result.
 
 ## Versioning and release
 
-Choose the bump by what changed for callers: **minor** for new endpoints or new
-behaviour, **patch** for fixes that keep the surface identical.
+Choose the bump by what changed for callers: **major** when the spec removed or
+renamed something callers depend on, **minor** for new endpoints or new
+behaviour, **patch** for fixes that keep the surface identical. A generated diff
+with removals in it is the signal for major — spec upgrades produce those.
 
 Do not touch `__version__` in `src/unstract/api_deployments/__init__.py` in your
 PR. The in-repo value is the *last released* version; `main.yml` reads it,

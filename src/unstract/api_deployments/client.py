@@ -3,8 +3,15 @@ platform.
 
 Classes:
     APIDeploymentsClient: A class to invoke APIs deployed on the Unstract platform.
-    APIDeploymentsClientException: A class to handle exceptions raised by the
-        APIDeploymentsClient class.
+    PlatformKeyClient: A class to read the account a platform API key belongs to
+        and the deployments in it.
+    UnstractError: Base of the exceptions both clients raise, aliased as
+        ``APIDeploymentsClientException`` for callers who catch that name.
+
+The two clients take different credentials and are not interchangeable. A
+deployment key runs deployments and cannot describe the account; a platform key
+describes the account and lists what is in it but cannot run anything. That
+split is the API's, not this module's.
 """
 
 import json
@@ -13,8 +20,9 @@ import ntpath
 import os
 import threading
 import time
-from typing import Any
+from typing import Any, Self
 from urllib.parse import parse_qs, urljoin, urlparse
+from uuid import UUID
 
 import attrs
 import httpx
@@ -46,7 +54,12 @@ from tenacity import (
 from tenacity.wait import wait_base
 
 from unstract.api_deployments._sdk_docstudio import AuthenticatedClient
-from unstract.api_deployments._sdk_docstudio.api.deployment import execute, status
+from unstract.api_deployments._sdk_docstudio.api.deployment import (
+    execute,
+    list_deployments,
+    status,
+)
+from unstract.api_deployments._sdk_docstudio.api.identity import whoami
 from unstract.api_deployments._sdk_docstudio.models import ExecuteRequest
 from unstract.api_deployments._sdk_docstudio.types import UNSET, File, Unset
 from unstract.api_deployments.utils import UnstractUtils
@@ -113,7 +126,7 @@ def _query_value(url: str, key: str) -> str:
     if not value:
         # Only the path is reported: the query is the service's to shape, and
         # the documented usage prints this exception straight to a log.
-        raise APIDeploymentsClientException(
+        raise APIDeploymentError(
             f"No {key} in the query of {parsed.path!r}. The status endpoint the "
             "service returned carries it; pass that endpoint unmodified."
         )
@@ -167,18 +180,21 @@ def _error_text(body: Any, response) -> str:
     return (response.text or "").strip()[:_ERROR_TEXT_LIMIT]
 
 
-class APIDeploymentsClientException(Exception):
-    """A class to handle exceptions raised by the APIClient class."""
+class UnstractError(Exception):
+    """Base for every error the clients in this package raise."""
 
-    def __init__(self, message):
-        def __init__(self, value):
-            self.value = value
 
-        def __str__(self):
-            return repr(self.value)
+class APIDeploymentError(UnstractError):
+    """Raised by :class:`APIDeploymentsClient`."""
 
-        def error_message(self):
-            return self.value
+
+class PlatformClientError(UnstractError):
+    """Raised by :class:`PlatformKeyClient`."""
+
+
+#: The name this exception shipped under. Aliased to the base, not a leaf, so
+#: it keeps catching everything either client raises.
+APIDeploymentsClientException = UnstractError
 
 
 class _WaitRetryAfterOrExponentialJitter(wait_base):
@@ -227,89 +243,18 @@ _EXECUTE_SEND_ONLY = frozenset(
 _STATUS_SEND_ONLY = frozenset({"execution_id", "include_metadata"})
 
 
-class APIDeploymentsClient:
-    """A class to invoke APIs deployed on the Unstract platform."""
+class _HttpxFacade:
+    """Transport shared by the clients in this module.
 
-    formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    logger = logging.getLogger(__name__)
-    log_stream_handler = logging.StreamHandler()
-    log_stream_handler.setFormatter(formatter)
-    logger.addHandler(log_stream_handler)
+    The pooled transport, the retry policy and the translation of httpx
+    failures into the ``requests`` types callers catch live here, so the
+    clients cannot drift apart on them. A subclass sets ``base_url``,
+    ``api_key``, ``verify``, ``transport_timeout`` and the retry knobs in its
+    own ``__init__``, and ``_error_class`` to the exception it raises.
+    """
 
-    api_key = ""
-    api_timeout = 300
-    in_progress_statuses = ["PENDING", "EXECUTING", "READY", "QUEUED", "INITIATED"]
-
-    def __init__(
-        self,
-        api_url: str,
-        api_key: str,
-        api_timeout: int = 300,
-        logging_level: str = "INFO",
-        include_metadata: bool = False,
-        verify: bool = True,
-        max_retries: int = 4,
-        initial_delay: float = 2.0,
-        max_delay: float = 60.0,
-        backoff_factor: float = 2.0,
-        jitter: float = 1.0,
-        *,
-        transport_timeout: float | None = None,
-    ):
-        """Initializes the APIClient class.
-
-        Args:
-            api_key (str): The API key to authenticate the API request.
-            api_timeout (int): Backend execution mode sent with the request —
-                see ``timeout`` on ``structure_file``. ``0`` or below queues the
-                execution and returns; above it the call runs synchronously and
-                the value bounds how long the backend waits.
-            logging_level (str): The logging level to log messages.
-            max_retries (int): Maximum number of retry attempts for failed requests.
-            initial_delay (float): Initial delay in seconds before the first retry.
-            max_delay (float): Maximum delay in seconds between retries.
-            backoff_factor (float): Multiplier applied to delay for each retry.
-            jitter (float): Maximum additive jitter in seconds added to each delay.
-            transport_timeout (float | None): Socket timeout in seconds. Unset
-                means a stalled connection blocks forever, which is what the
-                released client did; ``api_timeout`` cannot serve here because
-                it is an execution mode, not a socket timeout.
-        """
-        if logging_level == "":
-            logging_level = os.getenv("UNSTRACT_API_CLIENT_LOGGING_LEVEL", "INFO")
-        if logging_level == "DEBUG":
-            self.logger.setLevel(logging.DEBUG)
-        elif logging_level == "INFO":
-            self.logger.setLevel(logging.INFO)
-        elif logging_level == "WARNING":
-            self.logger.setLevel(logging.WARNING)
-        elif logging_level == "ERROR":
-            self.logger.setLevel(logging.ERROR)
-
-        # self.logger.setLevel(logging_level)
-        self.logger.debug("Logging level set to: " + logging_level)
-
-        if api_key == "":
-            self.api_key = os.getenv("UNSTRACT_API_DEPLOYMENT_KEY", "")
-        else:
-            self.api_key = api_key
-        self.logger.debug("API key set to: " + UnstractUtils.redact_key(self.api_key))
-
-        self.api_timeout = api_timeout
-        self.api_url = api_url
-        self.__save_base_url(api_url)
-        self.include_metadata = include_metadata
-        self.verify = verify
-        self.max_retries = max_retries
-        self.initial_delay = initial_delay
-        self.max_delay = max_delay
-        self.backoff_factor = backoff_factor
-        self.jitter = jitter
-        self.transport_timeout = transport_timeout
-        self._transport_client = None
-        self._transport_lock = threading.Lock()
+    #: Exception raised for anything this transport reports. Subclasses narrow it.
+    _error_class: type[UnstractError] = UnstractError
 
     def _is_retryable_status(self, status_code: int) -> bool:
         """Checks whether a status code should trigger a retry.
@@ -322,33 +267,19 @@ class APIDeploymentsClient:
         """
         return status_code >= 500 or status_code == 429
 
-    def __save_base_url(self, full_url: str):
-        """Extracts the base URL from the full URL and saves it.
-
-        Args:
-            full_url (str): The full URL of the API.
-        """
-        parsed_url = urlparse(full_url)
-        self.base_url = parsed_url.scheme + "://" + parsed_url.netloc
-        self.logger.debug("Base URL: " + self.base_url)
-
     @property
-    def _transport(self):
-        """The HTTP client, built on first use.
+    def _transport(self) -> AuthenticatedClient:
+        """The HTTP client and its connection pool, built on first use.
 
-        Untimed by default, matching the previous behaviour. ``api_timeout`` is
-        a backend execution mode (0 selects async execution), never a socket
-        timeout; feeding it to the transport fails deep in the connection layer
-        for the negative values the API accepts. ``transport_timeout`` is the
-        way to bound a stalled connection.
-
-        Built under a lock: two threads racing the first call would otherwise
-        each build a pool and one would be dropped still holding its sockets.
+        Both the wrapper and the pool inside it are built under the lock. The
+        pool is what holds sockets, and ``AuthenticatedClient`` builds it lazily
+        without synchronising, so two threads racing the first call would
+        otherwise each build one and drop the loser still holding its sockets.
         """
         if self._transport_client is None:
             with self._transport_lock:
                 if self._transport_client is None:
-                    self._transport_client = AuthenticatedClient(
+                    transport = AuthenticatedClient(
                         base_url=self.base_url,
                         token=self.api_key,
                         verify_ssl=self.verify,
@@ -360,6 +291,8 @@ class APIDeploymentsClient:
                         # finished-and-empty job.
                         follow_redirects=True,
                     )
+                    transport.get_httpx_client()
+                    self._transport_client = transport
         return self._transport_client
 
     def close(self) -> None:
@@ -375,66 +308,11 @@ class APIDeploymentsClient:
         if transport is not None:
             transport.get_httpx_client().close()
 
-    def __enter__(self) -> "APIDeploymentsClient":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
-
-    @property
-    def _deployment_route(self) -> tuple[str, str]:
-        """Organisation and API name, from the deployment URL's last two
-        segments."""
-        segments = urlparse(self.api_url).path.strip("/").split("/")
-        if len(segments) < 2:
-            raise APIDeploymentsClientException(
-                f"Cannot derive organisation and API name from api_url: {self.api_url}"
-            )
-        return segments[-2], segments[-1]
-
-    def _spec_route(self) -> str:
-        """The path the spec routes a poll to, or ``""`` when the deployment URL
-        carries no organisation and API name to build one from.
-
-        Built through the generated builder so it follows the spec rather than a
-        copy of it.
-        """
-        try:
-            org_name, api_name = self._deployment_route
-        except APIDeploymentsClientException:
-            return ""
-        return status._get_kwargs(org_name, api_name, execution_id="")["url"]
-
-    def _status_url(self, endpoint: str) -> str:
-        """Absolute URL to poll, under the deployment's own path prefix.
-
-        ``base_url`` is scheme and host only, so a deployment served under a path
-        prefix would execute -- the execute call sends the caller's URL verbatim
-        -- and then never poll. The prefix is whatever precedes the spec route
-        inside the deployment URL. Where the two do not line up there is no
-        prefix to derive, and the path the service returned is used as it came:
-        a guessed path polls nothing, and the execution behind it has already
-        been paid for.
-
-        A deployment URL with no organisation and API name in it -- an ingress
-        rewrite short enough to have neither -- has no route to line up against
-        and takes that same branch. The released client polled those, and the
-        execution has already been submitted by the time this runs.
-
-        Only the path is taken. A scheme and host in the reply would otherwise
-        decide where the deployment key is sent, and the reply is not the thing
-        that gets to choose that.
-        """
-        path = self._spec_route()
-        route = path.rstrip("/")
-        prefix = urlparse(self.api_url).path.rstrip("/")
-        if route and prefix.endswith(route):
-            return self.base_url + prefix[: -len(route)] + path
-        # Joined rather than concatenated: the query travels as params.
-        return urljoin(
-            self.base_url,
-            urlparse(endpoint)._replace(scheme="", netloc="", query="").geturl(),
-        )
 
     def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
         """Issue one request, translating transport failures on the way out.
@@ -451,9 +329,19 @@ class APIDeploymentsClient:
             **(kwargs.get("headers") or {}),
             "Authorization": f"Bearer {self.api_key}",
         }
-        return _translate_transport_errors(
-            self._transport.get_httpx_client().request, method, url, **kwargs
-        )
+
+        def _issue() -> httpx.Response:
+            client = self._transport.get_httpx_client()
+            try:
+                return client.request(method, url, **kwargs)
+            except RuntimeError as e:
+                # A close on another thread mid-send. httpx raises a bare
+                # RuntimeError for it, which the translator does not cover.
+                if not client.is_closed:
+                    raise
+                raise ConnectionError(str(e)) from e
+
+        return _translate_transport_errors(_issue)
 
     @staticmethod
     def _read_body(response):
@@ -569,6 +457,157 @@ class APIDeploymentsClient:
 
         return retrier(self._send, method, url, **kwargs)
 
+
+class APIDeploymentsClient(_HttpxFacade):
+    """A class to invoke APIs deployed on the Unstract platform."""
+
+    _error_class = APIDeploymentError
+
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    logger = logging.getLogger(__name__)
+    log_stream_handler = logging.StreamHandler()
+    log_stream_handler.setFormatter(formatter)
+    logger.addHandler(log_stream_handler)
+
+    api_key = ""
+    api_timeout = 300
+    in_progress_statuses = ["PENDING", "EXECUTING", "READY", "QUEUED", "INITIATED"]
+
+    def __init__(
+        self,
+        api_url: str,
+        api_key: str,
+        api_timeout: int = 300,
+        logging_level: str = "INFO",
+        include_metadata: bool = False,
+        verify: bool = True,
+        max_retries: int = 4,
+        initial_delay: float = 2.0,
+        max_delay: float = 60.0,
+        backoff_factor: float = 2.0,
+        jitter: float = 1.0,
+        *,
+        transport_timeout: float | None = None,
+    ):
+        """Initializes the APIClient class.
+
+        Args:
+            api_key (str): The API key to authenticate the API request.
+            api_timeout (int): Backend execution mode sent with the request —
+                see ``timeout`` on ``structure_file``. ``0`` or below queues the
+                execution and returns; above it the call runs synchronously and
+                the value bounds how long the backend waits.
+            logging_level (str): The logging level to log messages.
+            max_retries (int): Maximum number of retry attempts for failed requests.
+            initial_delay (float): Initial delay in seconds before the first retry.
+            max_delay (float): Maximum delay in seconds between retries.
+            backoff_factor (float): Multiplier applied to delay for each retry.
+            jitter (float): Maximum additive jitter in seconds added to each delay.
+            transport_timeout (float | None): Socket timeout in seconds. Unset
+                means a stalled connection blocks forever, which is what the
+                released client did; ``api_timeout`` cannot serve here because
+                it is an execution mode, not a socket timeout.
+        """
+        if logging_level == "":
+            logging_level = os.getenv("UNSTRACT_API_CLIENT_LOGGING_LEVEL", "INFO")
+        if logging_level == "DEBUG":
+            self.logger.setLevel(logging.DEBUG)
+        elif logging_level == "INFO":
+            self.logger.setLevel(logging.INFO)
+        elif logging_level == "WARNING":
+            self.logger.setLevel(logging.WARNING)
+        elif logging_level == "ERROR":
+            self.logger.setLevel(logging.ERROR)
+
+        self.logger.debug("Logging level set to: " + logging_level)
+
+        if api_key == "":
+            self.api_key = os.getenv("UNSTRACT_API_DEPLOYMENT_KEY", "")
+        else:
+            self.api_key = api_key
+        self.logger.debug("API key set to: " + UnstractUtils.redact_key(self.api_key))
+
+        self.api_timeout = api_timeout
+        self.api_url = api_url
+        self.__save_base_url(api_url)
+        self.include_metadata = include_metadata
+        self.verify = verify
+        self.max_retries = max_retries
+        self.initial_delay = initial_delay
+        self.max_delay = max_delay
+        self.backoff_factor = backoff_factor
+        self.jitter = jitter
+        self.transport_timeout = transport_timeout
+        self._transport_client = None
+        self._transport_lock = threading.Lock()
+
+    def __save_base_url(self, full_url: str):
+        """Extracts the base URL from the full URL and saves it.
+
+        Args:
+            full_url (str): The full URL of the API.
+        """
+        parsed_url = urlparse(full_url)
+        self.base_url = parsed_url.scheme + "://" + parsed_url.netloc
+        self.logger.debug("Base URL: " + self.base_url)
+
+    @property
+    def _deployment_route(self) -> tuple[str, str]:
+        """Organisation and API name, from the deployment URL's last two
+        segments."""
+        segments = urlparse(self.api_url).path.strip("/").split("/")
+        if len(segments) < 2:
+            raise APIDeploymentError(
+                f"Cannot derive organisation and API name from api_url: {self.api_url}"
+            )
+        return segments[-2], segments[-1]
+
+    def _spec_route(self) -> str:
+        """The path the spec routes a poll to, or ``""`` when the deployment URL
+        carries no organisation and API name to build one from.
+
+        Built through the generated builder so it follows the spec rather than a
+        copy of it.
+        """
+        try:
+            org_name, api_name = self._deployment_route
+        except APIDeploymentError:
+            return ""
+        return status._get_kwargs(org_name, api_name, execution_id="")["url"]
+
+    def _status_url(self, endpoint: str) -> str:
+        """Absolute URL to poll, under the deployment's own path prefix.
+
+        ``base_url`` is scheme and host only, so a deployment served under a path
+        prefix would execute -- the execute call sends the caller's URL verbatim
+        -- and then never poll. The prefix is whatever precedes the spec route
+        inside the deployment URL. Where the two do not line up there is no
+        prefix to derive, and the path the service returned is used as it came:
+        a guessed path polls nothing, and the execution behind it has already
+        been paid for.
+
+        A deployment URL with no organisation and API name in it -- an ingress
+        rewrite short enough to have neither -- has no route to line up against
+        and takes that same branch. The released client polled those, and the
+        execution has already been submitted by the time this runs.
+
+        Only the path is taken. A scheme and host in the reply would otherwise
+        decide where the deployment key is sent, and the reply is not the thing
+        that gets to choose that.
+        """
+        path = self._spec_route()
+        route = path.rstrip("/")
+        prefix = urlparse(self.api_url).path.rstrip("/")
+        if route and prefix.endswith(route):
+            return self.base_url + prefix[: -len(route)] + path
+        # Joined rather than concatenated: the query travels as params.
+        return urljoin(
+            self.base_url,
+            urlparse(endpoint)._replace(scheme="", netloc="", query="").geturl(),
+        )
+
     def structure_file(
         self,
         file_paths: list[str],
@@ -668,7 +707,7 @@ class APIDeploymentsClient:
                 if isinstance(e, FileNotFoundError)
                 else "Cannot read file"
             )
-            raise APIDeploymentsClientException(f"{reason}: {e}") from e
+            raise APIDeploymentError(f"{reason}: {e}") from e
 
         body = ExecuteRequest(
             files=[
@@ -923,3 +962,190 @@ class APIDeploymentsClient:
             )
 
         return obj_to_return
+
+
+class PlatformKeyClient(_HttpxFacade):
+    """Read the account a platform API key belongs to, and its deployments.
+
+    Separate from `APIDeploymentsClient` because the credential and the URL
+    shape are both different: that class takes a deployment key and derives an
+    organisation and API name from a deployment URL, while these operations take
+    a platform key and address the account. Folding them together would mean a
+    class whose required `api_url` is meaningless for half its methods.
+
+    The transport, retry policy and error translation are the shared ones in
+    `_HttpxFacade`, so a caller catching the `requests` exception types or
+    relying on retries gets the same behaviour from either client.
+    """
+
+    _error_class = PlatformClientError
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str | None = None,
+        *,
+        verify: bool = True,
+        transport_timeout: float | None = None,
+        logging_level: str = "INFO",
+        max_retries: int = 4,
+        initial_delay: float = 2.0,
+        max_delay: float = 60.0,
+        backoff_factor: float = 2.0,
+        jitter: float = 1.0,
+    ) -> None:
+        """
+        Args:
+            base_url (str): Scheme and host of the Unstract deployment, e.g.
+                ``https://us-central.unstract.com``. A path is ignored -- these
+                operations carry their own, which httpx resolves against the
+                origin -- and dropping a non-empty one is logged, because an
+                install served under a path prefix is unreachable this way.
+            api_key (str | None): Platform API key. Falls back to
+                ``$UNSTRACT_PLATFORM_KEY``.
+            verify (bool): Verify TLS certificates.
+            transport_timeout (float | None): Seconds before a stalled
+                connection is given up on. Unset means no bound.
+            logging_level (str): Level for this client's logger.
+            max_retries (int): Maximum number of retry attempts for failed requests.
+            initial_delay (float): Initial delay in seconds before the first retry.
+            max_delay (float): Maximum delay in seconds between retries.
+            backoff_factor (float): Multiplier applied to delay for each retry.
+            jitter (float): Maximum additive jitter in seconds added to each delay.
+        """
+        # Its own logger: the module one is shared, so levelling it here would
+        # re-level a live instance of the sibling client.
+        self.logger = logging.getLogger(f"{__name__}.PlatformKeyClient")
+        self.logger.setLevel(getattr(logging, logging_level.upper(), logging.INFO))
+
+        if api_key is None:
+            self.api_key = os.getenv("UNSTRACT_PLATFORM_KEY", "")
+        else:
+            self.api_key = api_key
+        if not self.api_key.strip():
+            raise PlatformClientError(
+                "A platform API key is required: pass api_key or set "
+                "$UNSTRACT_PLATFORM_KEY."
+            )
+        self.logger.debug(
+            "Platform key set to: " + UnstractUtils.redact_key(self.api_key)
+        )
+
+        parsed = urlparse(base_url)
+        if not parsed.scheme or not parsed.netloc:
+            raise PlatformClientError(
+                f"base_url must include a scheme and host, got {base_url!r}."
+            )
+        if parsed.path.strip("/"):
+            self.logger.warning(
+                "Ignoring path %r on base_url: these operations carry their own. "
+                "An install served under a path prefix is not reachable this way.",
+                parsed.path,
+            )
+        self.base_url = parsed.scheme + "://" + parsed.netloc
+
+        self.verify = verify
+        self.transport_timeout = transport_timeout
+        self.max_retries = max_retries
+        self.initial_delay = initial_delay
+        self.max_delay = max_delay
+        self.backoff_factor = backoff_factor
+        self.jitter = jitter
+        self._transport_client: AuthenticatedClient | None = None
+        self._transport_lock = threading.Lock()
+
+    def _read_or_raise(self, response: httpx.Response, what: str) -> dict[str, Any]:
+        """The JSON object of a 2xx, or an exception naming why it was refused.
+
+        Read directly rather than through the generated model, which is built
+        only for the statuses the spec declares and raises on any other body.
+        """
+        body = self._read_body(response)
+        self.logger.debug("%s returned %d", what, response.status_code)
+        if not 200 <= response.status_code < 300:
+            raise self._error_class(
+                f"{what} failed with {response.status_code}: "
+                f"{_error_text(body, response)}"
+            )
+        if body is None:
+            self.logger.error(
+                "%s returned %d with a body that could not be read as JSON: %s",
+                what,
+                response.status_code,
+                _error_text(None, response),
+            )
+            raise self._error_class(
+                f"{what} returned {response.status_code} with an unreadable body "
+                f"(content-type {response.headers.get('content-type')!r}): "
+                f"{_error_text(None, response)}"
+            )
+        if not isinstance(body, dict):
+            raise self._error_class(
+                f"{what} returned {response.status_code} with a JSON "
+                f"{type(body).__name__} where an object was expected: "
+                f"{_error_text(None, response)}"
+            )
+        return body
+
+    def whoami(self) -> dict[str, Any]:
+        """The organisation this key belongs to, and the key's own scope.
+
+        Returns:
+            dict: ``organization_id``, ``organization_name``, ``permission``
+                and ``key_name``, the shape `WhoAmIResponse` models. Use the
+                ``organization_id`` as the ``org_id`` other operations take.
+        """
+        self.logger.debug("Resolving identity via the whoami operation")
+        response = self._request_with_retry(**whoami._get_kwargs())
+        return self._read_or_raise(response, "whoami")
+
+    def list_deployments(
+        self,
+        org_id: str,
+        *,
+        api_name: str | None = None,
+        search: str | None = None,
+        ordering: str | None = None,
+        page: int | None = None,
+        page_size: int | None = None,
+        workflow: UUID | str | None = None,
+    ) -> dict[str, Any]:
+        """The API deployments in one organisation, one page at a time.
+
+        A filter left as ``None`` is not sent. Follow ``next`` rather than
+        assuming ``results`` is the whole set.
+
+        Args:
+            org_id (str): Organisation to list within. `whoami` resolves this
+                from the key.
+            api_name (str): Return only the deployment with this exact API name.
+            search (str): Free-text filter.
+            ordering (str): Field to order by.
+            page (int): 1-based page number.
+            page_size (int): Rows per page.
+            workflow (UUID | str): Return only deployments of this workflow.
+
+        Returns:
+            dict: ``count``, ``next``, ``previous`` and ``results``, the shape
+                `PaginatedAPIDeploymentSummaryList` models.
+        """
+        if not org_id.strip():
+            raise PlatformClientError(
+                "org_id is required; whoami() resolves it from the key."
+            )
+        self.logger.debug("Listing deployments for organisation: %s", org_id)
+        # Omitted rather than passed as None: the builder renders some
+        # parameters before it filters None out, sending the string "None".
+        filters = {
+            "api_name": api_name,
+            "search": search,
+            "ordering": ordering,
+            "page": page,
+            "page_size": page_size,
+            "workflow": workflow,
+        }
+        request_kwargs = list_deployments._get_kwargs(
+            org_id, **{k: v for k, v in filters.items() if v is not None}
+        )
+        response = self._request_with_retry(**request_kwargs)
+        return self._read_or_raise(response, "list_deployments")

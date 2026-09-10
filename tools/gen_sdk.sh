@@ -21,8 +21,8 @@
 # both this script and the drift gate report clean either way.
 #
 #   SPEC_SOURCE: Zipstack/unstract specs/docstudio-oss.json
-#                @ eddd4b746765c77a3d6f64b428fd35d2261e60e7
-#                sha256 e453d4f7444d3757a24a1da73373b11c3d362ceb2d7e13e8658a5b3c068b86f5
+#                @ 520b98d7acf5a6d138b24d9787bd788b89150b76
+#                sha256 68a31eaf72e54daf8173ae3ef42e4174b257c93b1afc608114582a81be135bd1
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

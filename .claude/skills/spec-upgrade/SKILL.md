@@ -71,6 +71,31 @@ Upstream, the spec is produced by the backend that serves these endpoints
    the facade is where it becomes public API. Fixes belong here or upstream in
    the spec, never in the generated tree — regeneration overwrites that wholesale.
 
+   A new operation belongs to `APIDeploymentsClient` if it takes a deployment
+   key, `PlatformKeyClient` if it takes a platform key, otherwise a new subclass
+   of `_HttpxFacade` — never a free-standing class, or the transport, retry and
+   exception translation get reimplemented and drift. The method is two lines:
+
+   ```python
+   def list_widgets(self, org_id: str, *, page: int | None = None) -> dict[str, Any]:
+       kwargs = list_widgets._get_kwargs(org_id, **{"page": page} if page else {})
+       return self._read_or_raise(self._request_with_retry(**kwargs), "list_widgets")
+   ```
+
+   - Build from `_get_kwargs`, not `sync_detailed`: the generated
+     `_parse_response` calls `from_dict` on an error body unguarded, so an
+     undeclared one raises before the facade sees the status. Omit unset
+     parameters rather than passing `None` — the builder renders some before it
+     filters `None` out. Both are private to the generator, so pin them in
+     `tests/test_compat.py`.
+   - Send through `_request_with_retry`, and read through `_read_or_raise`,
+     which checks the status first.
+   - Return `dict[str, Any]`. The generated models are exported for callers who
+     want typing; a hand-written `TypedDict` would not survive regeneration.
+   - A new error type subclasses `UnstractError`.
+
+   `PlatformKeyClient.whoami` is the smallest example in the tree.
+
 6. **Run the tests:** `uv run pytest tests/`. `tests/test_compat.py` compares
    this client against the last released one, vendored under `tests/baseline/`.
    Refresh that baseline only when you mean to move the parity reference point,
@@ -87,8 +112,10 @@ fail the same way. If it is red, run step 3 and commit the result.
 
 Choose the bump by what changed for callers: **major** when the spec removed or
 renamed something callers depend on, **minor** for new endpoints or new
-behaviour, **patch** for fixes that keep the surface identical. A generated diff
-with removals in it is the signal for major — spec upgrades produce those.
+behaviour — a new facade method included — **patch** for fixes that keep the
+surface identical. A generated diff with removals in it is the signal for major
+— spec upgrades produce those. Behaviour the baseline pinned that has moved goes
+in `ACCEPTED_DIVERGENCES` in the same commit.
 
 Do not touch `__version__` in `src/unstract/api_deployments/__init__.py` in your
 PR. The in-repo value is the *last released* version; `main.yml` reads it,

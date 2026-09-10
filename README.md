@@ -113,12 +113,47 @@ client = APIDeploymentsClient(
 The retry logic uses exponential backoff with full jitter and respects the `Retry-After` header on 429 responses.
 
 
+## Listing deployments with a platform key
+
+`PlatformKeyClient` takes a **platform** API key, not a deployment key, and reads
+the account that key belongs to. It cannot run a deployment.
+
+```python
+from unstract.api_deployments import PlatformKeyClient
+
+with PlatformKeyClient("https://us-central.unstract.com", "your_platform_key") as client:
+    org_id = client.whoami()["organization_id"]
+    page = client.list_deployments(org_id, page_size=50)
+    for deployment in page["results"]:
+        print(deployment["api_name"], deployment["api_endpoint"])
+```
+
+Follow `next` for further pages. `api_key` falls back to `$UNSTRACT_PLATFORM_KEY`.
+
+## Errors
+
+Every error either client raises derives from `UnstractError`:
+
+| Exception | Raised by |
+|-----------|-----------|
+| `UnstractError` | base of both — catch this to catch everything |
+| `APIDeploymentError` | `APIDeploymentsClient` |
+| `PlatformClientError` | `PlatformKeyClient` |
+
+`APIDeploymentsClientException` is an alias of `UnstractError`, so existing
+`except` clauses keep working.
+
+Transport failures are raised as the `requests` exception types
+(`ConnectionError`, `Timeout`, and friends) rather than the httpx ones.
+
 ## Internals
 
 `unstract.api_deployments._sdk_docstudio` is generated from the deployment API's
 OpenAPI spec by `tools/gen_sdk.sh` and is an implementation detail of the
-transport. `APIDeploymentsClient` is the supported surface — import from it, not
-from the generated tree, which is regenerated wholesale whenever the spec moves.
+transport. `APIDeploymentsClient` and `PlatformKeyClient` are the supported
+surface — import from those, or from the response models re-exported alongside
+them, not from the generated tree, which is regenerated wholesale whenever the
+spec moves.
 
 ## Cloning an organization
 

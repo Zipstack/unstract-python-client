@@ -25,6 +25,7 @@ import importlib.util
 import inspect
 import io
 import json
+import logging
 import os
 import re
 import socket
@@ -52,14 +53,21 @@ from requests.exceptions import (
 )
 
 from unstract import api_deployments
+from unstract.api_deployments import (
+    PaginatedAPIDeploymentSummaryList,
+    WhoAmIResponse,
+)
 from unstract.api_deployments._sdk_docstudio import AuthenticatedClient
 from unstract.api_deployments._sdk_docstudio.types import UNSET
 from unstract.api_deployments.client import (
     _EXECUTE_SEND_ONLY,
     _STATUS_SEND_ONLY,
+    APIDeploymentError,
     APIDeploymentsClient,
     APIDeploymentsClientException,
-    PlatformAPIClient,
+    PlatformClientError,
+    PlatformKeyClient,
+    UnstractError,
 )
 
 BASELINE_VERSION = "1.5.3"
@@ -1896,7 +1904,7 @@ def test_every_declared_operation_is_wrapped():
 
     Two sets, unioned, because the spec now serves two credentials: the
     deployment-key operations reached through `APIDeploymentsClient` and the
-    platform-key ones through `PlatformAPIClient`. The union keeps the whole
+    platform-key ones through `PlatformKeyClient`. The union keeps the whole
     comparison intact -- an operation belonging to neither still fails here.
     """
     spec = json.loads(SPEC_PATH.read_text())
@@ -1994,11 +2002,46 @@ def _deployment_page() -> dict:
     }
 
 
+def _identity_body() -> dict:
+    """The identity body `whoami` answers with, in the shape the spec declares."""
+    return {
+        "organization_id": "org-a",
+        "organization_name": "Org A",
+        "permission": "read",
+        "key_name": "cli-key",
+    }
+
+
+@contextmanager
+def caplog_at_error():
+    """Collect this client's own ERROR records.
+
+    `PlatformKeyClient` configures its logger itself, so the level and handlers
+    are not the ones `caplog` attaches to the root.
+    """
+    records = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = _Collect()
+    logger = logging.getLogger(f"{PlatformKeyClient.__module__}.PlatformKeyClient")
+    logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+
+
 def _platform_client(**kwargs):
     kwargs.setdefault("base_url", "https://example.unstract.com")
     kwargs.setdefault("api_key", "pk-test")
     kwargs.setdefault("logging_level", "ERROR")
-    return PlatformAPIClient(**kwargs)
+    # Retries off by default: the error statuses exercised below include ones
+    # the client retries, and the backoff is real time.
+    kwargs.setdefault("max_retries", 0)
+    return PlatformKeyClient(**kwargs)
 
 
 @contextmanager
@@ -2010,7 +2053,7 @@ def _platform_reply(status_code, json_data):
     real and observable on `transport.request`.
 
     It does **not** exercise the generated `_parse_response` or the response
-    models: `PlatformAPIClient` reads the body itself, deliberately, because
+    models: `PlatformKeyClient` reads the body itself, deliberately, because
     those parsers raise on an error body the spec did not declare. Their
     coverage is `test_the_generated_platform_models_read_the_bodies_the_server_sends`
     and `test_the_generated_platform_parsers_read_a_declared_response`.
@@ -2019,6 +2062,20 @@ def _platform_reply(status_code, json_data):
     transport.request.return_value = _httpx_response(status_code, json_data)
     with patch.object(AuthenticatedClient, "get_httpx_client", return_value=transport):
         yield transport
+
+
+#: How each platform operation is reached on the facade. Kept beside the
+#: manifest and asserted against it: dispatching on a name meant an operation
+#: with no method behind it could be listed and silently never called.
+PLATFORM_CALLS = {
+    "whoami": lambda client: client.whoami(),
+    "list_deployments": lambda client: client.list_deployments("org-a"),
+}
+
+
+def test_every_platform_operation_has_a_method_behind_it():
+    assert set(PLATFORM_CALLS) == PLATFORM_OPERATIONS
+    assert not (WRAPPED_OPERATIONS & PLATFORM_OPERATIONS)
 
 
 @pytest.mark.parametrize("operation", sorted(PLATFORM_OPERATIONS))
@@ -2042,10 +2099,7 @@ def test_every_platform_error_status_is_reported_with_its_reason(operation):
         body, expected = _body_for(schema) if schema else (None, "")
         with _platform_reply(status_code, body):
             with pytest.raises(APIDeploymentsClientException) as caught:
-                if operation == "whoami":
-                    _platform_client().whoami()
-                else:
-                    _platform_client().list_deployments("org-a")
+                PLATFORM_CALLS[operation](_platform_client())
         message = str(caught.value)
         assert str(status_code) in message, (operation, status_code)
         if expected:
@@ -2055,16 +2109,10 @@ def test_every_platform_error_status_is_reported_with_its_reason(operation):
 def test_whoami_returns_the_four_fields_the_spec_declares():
     """The organisation is read from the key server-side, so this is the call
     that turns a bare key into the `org_id` every other operation needs."""
-    identity = {
-        "organization_id": "org-a",
-        "organization_name": "Org A",
-        "permission": "read",
-        "key_name": "cli-key",
-    }
-    with _platform_reply(200, identity) as transport:
+    with _platform_reply(200, _identity_body()) as transport:
         result = _platform_client().whoami()
 
-    assert result == identity
+    assert result == _identity_body()
     # Issued through `_send`, which passes method and url positionally the way
     # the sibling client does.
     method, url = transport.request.call_args.args[:2]
@@ -2091,32 +2139,19 @@ def test_a_missing_platform_key_is_refused_at_construction():
     """Rather than at the first call, where it would look like a server refusal."""
     with patch.dict(os.environ, {}, clear=True):
         with pytest.raises(APIDeploymentsClientException) as caught:
-            PlatformAPIClient(base_url="https://example.unstract.com")
+            PlatformKeyClient(base_url="https://example.unstract.com")
     assert "UNSTRACT_PLATFORM_KEY" in str(caught.value)
 
 
 def test_the_platform_key_is_taken_from_the_environment_when_unset():
     with patch.dict(os.environ, {"UNSTRACT_PLATFORM_KEY": "pk-from-env"}, clear=True):
-        client = PlatformAPIClient(base_url="https://example.unstract.com")
+        client = PlatformKeyClient(base_url="https://example.unstract.com")
     assert client.api_key == "pk-from-env"
 
 
 def test_a_base_url_without_a_host_is_refused():
     with pytest.raises(APIDeploymentsClientException):
         _platform_client(base_url="not-a-url")
-
-
-def test_a_path_on_the_base_url_is_discarded():
-    """These operations carry their own paths; keeping a caller's would produce
-    a URL no deployment serves."""
-    client = _platform_client(
-        base_url="https://example.unstract.com/deployment/api/x/y/"
-    )
-    assert client.base_url == "https://example.unstract.com"
-
-
-# The findings below were raised on PR #29 and each fix is pinned here, so a
-# regression to the pre-review behaviour fails rather than passing quietly.
 
 
 @pytest.mark.parametrize(
@@ -2208,12 +2243,19 @@ def test_both_clients_are_reachable_from_the_package_root():
     surface, and the sibling is re-exported."""
     from unstract import api_deployments as pkg
 
-    assert pkg.PlatformAPIClient is PlatformAPIClient
+    assert pkg.PlatformKeyClient is PlatformKeyClient
     assert pkg.APIDeploymentsClient is APIDeploymentsClient
+
+    # The models these operations answer with, so a caller can type a response
+    # without importing from the generated tree.
+    assert pkg.WhoAmIResponse is WhoAmIResponse
+    assert pkg.PaginatedAPIDeploymentSummaryList is PaginatedAPIDeploymentSummaryList
+    assert issubclass(pkg.APIDeploymentError, pkg.UnstractError)
+    assert issubclass(pkg.PlatformClientError, pkg.UnstractError)
 
 
 def test_the_generated_platform_models_read_the_bodies_the_server_sends():
-    """`PlatformAPIClient` reads bodies itself, so nothing else here would
+    """`PlatformKeyClient` reads bodies itself, so nothing else here would
     notice a generated model that silently lost a field. They are still public
     surface for anyone importing them, and the parity tests above cover only the
     deployment models.
@@ -2307,7 +2349,7 @@ def test_the_generated_platform_parsers_read_a_declared_response():
 
 
 def test_the_generated_parsers_raise_on_an_undeclared_error_body():
-    """The reason `PlatformAPIClient` does not use them. `from_dict` indexes
+    """The reason `PlatformKeyClient` does not use them. `from_dict` indexes
     required keys with no default and `response.json()` is unguarded, so a
     gateway's HTML 401 or a DRF-shaped body reaches a caller of `sync_detailed`
     as an exception rather than a refusal. Pinned so the facade's decision to
@@ -2325,3 +2367,264 @@ def test_the_generated_parsers_raise_on_an_undeclared_error_body():
         whoami._parse_response(
             client=client, response=_httpx_response(401, {"detail": "Invalid token."})
         )
+
+
+def test_the_generated_request_builders_still_return_what_the_facade_splats():
+    """The facade builds requests from the generated `_get_kwargs`, which is
+    private to the generator. A generator upgrade that renames it or changes
+    the keys it returns has to fail here rather than at a customer's call."""
+    from unstract.api_deployments._sdk_docstudio.api.deployment import (
+        list_deployments as list_deployments_op,
+    )
+    from unstract.api_deployments._sdk_docstudio.api.identity import (
+        whoami as whoami_op,
+    )
+
+    identity_kwargs = whoami_op._get_kwargs()
+    assert identity_kwargs["method"] == "get"
+    assert identity_kwargs["url"] == "/api/v1/unstract/whoami/"
+
+    listing_kwargs = list_deployments_op._get_kwargs("org-a", api_name="x")
+    assert listing_kwargs["method"] == "get"
+    assert "/org-a/" in listing_kwargs["url"]
+    assert listing_kwargs["params"] == {"api_name": "x"}
+    # Unset parameters are dropped rather than sent as a sentinel.
+    assert list_deployments_op._get_kwargs("org-a")["params"] == {}
+
+
+def test_a_platform_request_carries_the_current_key_over_a_real_transport():
+    """Asserted on the request as httpx composed it, not on a mock's recorded
+    kwargs: `AuthenticatedClient` bakes a header of its own at construction, so
+    which one wins is httpx's merge behaviour rather than this client's."""
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json=_identity_body())
+
+    client = _platform_client()
+    transport = client._transport
+    transport.get_httpx_client()._transport = httpx.MockTransport(handler)
+
+    client.whoami()
+    assert seen[-1].headers["Authorization"] == "Bearer pk-test"
+
+    client.api_key = "pk-rotated"
+    client.whoami()
+    assert seen[-1].headers["Authorization"] == "Bearer pk-rotated"
+    assert str(seen[-1].url).endswith("/api/v1/unstract/whoami/")
+
+
+def test_closing_the_platform_client_releases_the_pool_and_the_next_call_rebuilds():
+    """The mock-based check cannot see a pool that was dropped rather than
+    closed, nor that the rebuild path still works."""
+    client = _platform_client()
+    httpx_client = client._transport.get_httpx_client()
+    client.close()
+    assert httpx_client.is_closed
+    assert client._transport_client is None
+    client.close()
+    assert client._transport.get_httpx_client() is not httpx_client
+    client.close()
+
+
+def test_the_platform_transport_is_built_once_under_contention():
+    """Both the wrapper and the pool inside it are built under the lock; a pool
+    built twice leaves one holding sockets that nothing closes."""
+    client = _platform_client()
+    barrier = threading.Barrier(8)
+    seen = []
+
+    def build():
+        barrier.wait()
+        seen.append(client._transport)
+
+    threads = [threading.Thread(target=build) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len({id(transport) for transport in seen}) == 1
+    client.close()
+
+
+def test_the_platform_client_retries_a_retryable_status():
+    """Two idempotent GETs, and the README promises those are always retried.
+    Without this the sibling retries and this client does not."""
+    replies = [
+        _httpx_response(503, None),
+        _httpx_response(503, None),
+        _httpx_response(200, _identity_body()),
+    ]
+    transport = MagicMock()
+    transport.request.side_effect = replies
+    with patch.object(AuthenticatedClient, "get_httpx_client", return_value=transport):
+        result = _platform_client(max_retries=2, initial_delay=0.01).whoami()
+
+    assert result == _identity_body()
+    assert transport.request.call_count == 3
+
+
+def test_the_platform_transport_uses_the_settings_it_was_given():
+    """A dropped `verify_ssl` disables certificate checking silently."""
+    client = _platform_client(transport_timeout=7.5, verify=False)
+    httpx_client = client._transport.get_httpx_client()
+    assert httpx_client.timeout.connect == 7.5
+    assert client._transport_client._verify_ssl is False
+    client.close()
+
+
+def test_a_json_body_that_is_not_an_object_is_refused():
+    """Nothing else checks the shape, so a bare list would reach the caller as
+    a `dict` and fail on their first subscript instead of here."""
+    with _platform_reply(200, [{"id": 1}]):
+        with pytest.raises(APIDeploymentsClientException) as caught:
+            _platform_client().list_deployments("org-a")
+    assert "list" in str(caught.value)
+
+
+def test_a_2xx_body_that_is_not_json_reports_what_arrived():
+    """An SSO or maintenance page answering 200 is the everyday cause, and the
+    status alone does not distinguish it from a wrong host."""
+    response = httpx.Response(
+        200,
+        text="<html>login</html>",
+        headers={"content-type": "text/html"},
+        request=httpx.Request("GET", "https://example.unstract.com/"),
+    )
+    transport = MagicMock()
+    transport.request.return_value = response
+    with patch.object(AuthenticatedClient, "get_httpx_client", return_value=transport):
+        with pytest.raises(APIDeploymentsClientException) as caught:
+            _platform_client().whoami()
+    message = str(caught.value)
+    assert "text/html" in message
+    assert "login" in message
+
+
+def test_an_unfiltered_listing_sends_no_filters_at_all():
+    """The builder renders `workflow` with `str()` before it drops the
+    parameters that are None, so a None default reaches the server as the
+    literal string "None" -- a filter matching no workflow, on every otherwise
+    unfiltered call."""
+    with _platform_reply(200, _deployment_page()) as transport:
+        _platform_client().list_deployments("org-a")
+
+    assert transport.request.call_args.kwargs["params"] == {}
+
+    with _platform_reply(200, _deployment_page()) as transport:
+        _platform_client().list_deployments(
+            "org-a", workflow="22222222-2222-2222-2222-222222222222"
+        )
+
+    params = transport.request.call_args.kwargs["params"]
+    assert params == {"workflow": "22222222-2222-2222-2222-222222222222"}
+
+
+def test_a_close_during_a_call_arrives_as_the_documented_exception():
+    """httpx answers a send on a closed client with a bare RuntimeError, which
+    is not in the subtree the translator covers. A caller catching the
+    documented `requests` classes would not catch it."""
+    client = _platform_client()
+    httpx_client = client._transport.get_httpx_client()
+
+    def close_then_send(*args, **kwargs):
+        httpx_client.close()
+        return original(*args, **kwargs)
+
+    original = httpx_client.request
+    with patch.object(httpx_client, "request", side_effect=close_then_send):
+        with pytest.raises(ConnectionError):
+            client.whoami()
+
+
+def test_an_unreadable_body_is_bounded_in_the_log_as_well_as_the_error():
+    """The error truncates it and the log did not, so the default level was the
+    wider disclosure of the two."""
+    body = "x" * 4000
+    response = httpx.Response(
+        200,
+        text=body,
+        headers={"content-type": "text/plain"},
+        request=httpx.Request("GET", "https://example.unstract.com/"),
+    )
+    transport = MagicMock()
+    transport.request.return_value = response
+    with caplog_at_error() as records:
+        with patch.object(
+            AuthenticatedClient, "get_httpx_client", return_value=transport
+        ):
+            with pytest.raises(APIDeploymentsClientException):
+                _platform_client().whoami()
+
+    logged = "".join(record.getMessage() for record in records)
+    assert "x" in logged
+    assert len(logged) < len(body)
+
+
+def test_a_whitespace_organisation_is_refused_before_the_request():
+    """It is not empty, so the emptiness check passed it, and `quote` then
+    encoded it into the path as %20 segments."""
+    with pytest.raises(APIDeploymentsClientException) as caught:
+        _platform_client().list_deployments("   ")
+    assert "whoami()" in str(caught.value)
+
+
+def test_an_empty_organisation_is_refused_before_the_request():
+    """An empty segment builds a path the router answers for something else."""
+    with pytest.raises(APIDeploymentsClientException) as caught:
+        _platform_client().list_deployments("")
+    assert "whoami()" in str(caught.value)
+
+
+def test_a_path_on_the_base_url_is_discarded_and_the_drop_is_reported(caplog):
+    """Discarding it is deliberate -- these operations carry their own paths, and
+    a pasted deployment URL would otherwise build one no deployment serves. But
+    an install served under a path prefix becomes unreachable that way, and a
+    bare 404 from the proxy does not say so."""
+    client = _platform_client(
+        base_url="https://example.unstract.com/deployment/api/x/y/"
+    )
+    assert client.base_url == "https://example.unstract.com"
+
+    with caplog.at_level(logging.WARNING):
+        _platform_client(
+            base_url="https://internal.corp/unstract/", logging_level="WARNING"
+        )
+    assert "/unstract/" in caplog.text
+
+
+def test_the_published_exception_name_still_catches_both_clients():
+    """It is the name callers already catch, so it has to stay the widest one."""
+    assert APIDeploymentsClientException is UnstractError
+    assert issubclass(APIDeploymentError, UnstractError)
+    assert issubclass(PlatformClientError, UnstractError)
+
+    with _platform_reply(401, {"message": "bad key"}):
+        with pytest.raises(APIDeploymentsClientException):
+            _platform_client().whoami()
+
+    with pytest.raises(APIDeploymentsClientException):
+        _client(api_url="https://example.com/").check_execution_status("")
+
+
+def test_the_exception_carries_its_message():
+    """The released class accepted a message and dropped it, leaving `str()`
+    working only through `BaseException.args`."""
+    error = UnstractError("something went wrong")
+    assert str(error) == "something went wrong"
+    assert error.args == ("something went wrong",)
+
+
+def test_the_two_clients_do_not_share_a_logger():
+    """`APIDeploymentsClient.logger` is the module logger. Levelling that one
+    from here would re-level a live instance of the sibling, turning its debug
+    output -- which includes response bodies -- on or off as a side effect."""
+    deployment = _client(logging_level="DEBUG")
+    assert deployment.logger.level == logging.DEBUG
+
+    platform = _platform_client(logging_level="ERROR")
+    assert platform.logger is not deployment.logger
+    assert deployment.logger.level == logging.DEBUG
+    assert platform.logger.level == logging.ERROR

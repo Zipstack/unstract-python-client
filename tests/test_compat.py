@@ -25,10 +25,12 @@ import importlib.util
 import inspect
 import io
 import json
+import os
 import re
 import socket
 import threading
 import tomllib
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
@@ -50,13 +52,15 @@ from requests.exceptions import (
 )
 
 from unstract import api_deployments
+from unstract.api_deployments._sdk_docstudio import AuthenticatedClient
+from unstract.api_deployments._sdk_docstudio.types import UNSET
 from unstract.api_deployments.client import (
     _EXECUTE_SEND_ONLY,
     _STATUS_SEND_ONLY,
     APIDeploymentsClient,
     APIDeploymentsClientException,
+    PlatformAPIClient,
 )
-from unstract.api_deployments._sdk_docstudio.types import UNSET
 
 BASELINE_VERSION = "1.5.3"
 BASELINE_PATH = Path(__file__).parent / "baseline" / "client_1_5_3.py"
@@ -71,6 +75,14 @@ STATUS_ENDPOINT = "/deployment/api/testorg/testapi/?execution_id=exec-123"
 #: Operations the facade wraps. The spec declares exactly these, and a new one
 #: has to be added here deliberately rather than arriving unnoticed.
 WRAPPED_OPERATIONS = frozenset({"execute", "status"})
+
+#: The platform-key operations, kept apart from the set above rather than merged
+#: into it. They take a different credential, reach a different facade class,
+#: and declare a different error family -- `whoami` declares no `ErrorResponse`
+#: at all, so the "both families are in play" assertion below is false for them
+#: by construction. `_declared_responses` also cannot read them: their 500
+#: carries no body, and it indexes `content` unconditionally.
+PLATFORM_OPERATIONS = frozenset({"whoami", "list_deployments"})
 
 #: Every accepted divergence from the baseline, named as the module docstring
 #: names it. A divergence pinned by a test but missing from that list is only
@@ -1501,6 +1513,10 @@ def _body_for(schema: str) -> tuple[dict, str]:
         }, "the reason"
     if schema == "AcknowledgedResponse":
         return {"status": "COMPLETED", "message": "the reason"}, "the reason"
+    if schema == "PlatformKeyError":
+        # What CustomAuthMiddleware sends: a bare {"message": ...}, before DRF
+        # is entered, so it never carries the handler's {type, errors[]} shape.
+        return {"message": "the reason"}, "the reason"
     # StatusResponse. The status endpoint's own envelope carries per-file
     # results, never a reason: on these statuses the execution's state is the
     # answer, and any reason is inside a file's own entry.
@@ -1877,6 +1893,11 @@ def test_every_declared_operation_is_wrapped():
     Compared whole rather than after subtracting an exception list: an entry
     excusing an operation the spec no longer declares keeps passing forever, and
     nothing about a green run says the list is still describing anything.
+
+    Two sets, unioned, because the spec now serves two credentials: the
+    deployment-key operations reached through `APIDeploymentsClient` and the
+    platform-key ones through `PlatformAPIClient`. The union keeps the whole
+    comparison intact -- an operation belonging to neither still fails here.
     """
     spec = json.loads(SPEC_PATH.read_text())
     declared = {
@@ -1885,7 +1906,7 @@ def test_every_declared_operation_is_wrapped():
         for method, operation in path.items()
         if method in {"get", "post", "put", "patch", "delete"}
     }
-    assert declared == WRAPPED_OPERATIONS
+    assert declared == WRAPPED_OPERATIONS | PLATFORM_OPERATIONS
 
 
 def test_the_baseline_is_the_released_client_unmodified():
@@ -1893,3 +1914,180 @@ def test_the_baseline_is_the_released_client_unmodified():
     # any provenance it likes, and every parity test here would still pass.
     assert BASELINE_PATH.name == f"client_{BASELINE_VERSION.replace('.', '_')}.py"
     assert hashlib.sha256(BASELINE_PATH.read_bytes()).hexdigest() == BASELINE_SHA256
+
+
+# --------------------------------------------------------------------------- #
+# The platform-key facade
+# --------------------------------------------------------------------------- #
+
+#: Every error status each platform operation declares, and the shape it carries.
+#: A bodyless status maps to None -- the spec declares a 500 with no content on
+#: both, so there is nothing for a caller to parse and nothing to assert a reason
+#: from. Kept explicit rather than derived so a spec that starts declaring a body
+#: there fails here instead of silently gaining an unread branch.
+PLATFORM_ERROR_STATUSES = {
+    "whoami": {401: "PlatformKeyError", 500: None},
+    "list_deployments": {
+        400: "ErrorResponse",
+        401: "PlatformKeyError",
+        403: "PlatformKeyError",
+        500: None,
+    },
+}
+
+
+def _platform_declared(operation_id: str) -> dict[int, str | None]:
+    """``{status: schema name or None}`` for one platform operation.
+
+    Separate from `_declared_responses` because that one indexes `content`
+    unconditionally and these operations declare a bodyless 500.
+    """
+    spec = json.loads(SPEC_PATH.read_text())
+    for path in spec["paths"].values():
+        for method, operation in path.items():
+            if method != "get" or operation.get("operationId") != operation_id:
+                continue
+            out: dict[int, str | None] = {}
+            for code, body in operation["responses"].items():
+                ref = (
+                    body.get("content", {})
+                    .get("application/json", {})
+                    .get("schema", {})
+                    .get("$ref", "")
+                )
+                out[int(code)] = ref.split("/")[-1] or None
+            return out
+    raise AssertionError(f"{operation_id} not declared in the spec")
+
+
+def _platform_client(**kwargs):
+    kwargs.setdefault("base_url", "https://example.unstract.com")
+    kwargs.setdefault("api_key", "pk-test")
+    kwargs.setdefault("logging_level", "ERROR")
+    return PlatformAPIClient(**kwargs)
+
+
+@contextmanager
+def _platform_reply(status_code, json_data):
+    """Answer the next generated request with this response.
+
+    Patched at `get_httpx_client` rather than at `sync_detailed`, so the
+    generated parsing and model construction still run -- that is the layer a
+    regeneration changes, and mocking above it would test nothing about it.
+    """
+    transport = MagicMock()
+    transport.request.return_value = _httpx_response(status_code, json_data)
+    with patch.object(AuthenticatedClient, "get_httpx_client", return_value=transport):
+        yield transport
+
+
+@pytest.mark.parametrize("operation", sorted(PLATFORM_OPERATIONS))
+def test_the_platform_operations_declare_the_statuses_pinned_here(operation):
+    """The spec is the source; this manifest is the pin. A status the spec adds
+    or drops arrives as a failure rather than as an unread branch."""
+    declared = _platform_declared(operation)
+    errors = {code: schema for code, schema in declared.items() if code != 200}
+    assert errors == PLATFORM_ERROR_STATUSES[operation], operation
+
+
+@pytest.mark.parametrize("operation", sorted(PLATFORM_OPERATIONS))
+def test_every_platform_error_status_is_reported_with_its_reason(operation):
+    """A refusal has to reach the caller as an exception naming the reason.
+
+    `raise_on_unexpected_status` is off on the shared transport, so a non-2xx
+    arrives as an ordinary response; without the facade's own check a 401 would
+    read as an empty result rather than a rejected key.
+    """
+    for status_code, schema in PLATFORM_ERROR_STATUSES[operation].items():
+        body, expected = _body_for(schema) if schema else (None, "")
+        with _platform_reply(status_code, body):
+            with pytest.raises(APIDeploymentsClientException) as caught:
+                if operation == "whoami":
+                    _platform_client().whoami()
+                else:
+                    _platform_client().list_deployments("org-a")
+        message = str(caught.value)
+        assert str(status_code) in message, (operation, status_code)
+        if expected:
+            assert expected in message, (operation, status_code, schema)
+
+
+def test_whoami_returns_the_four_fields_the_spec_declares():
+    """The organisation is read from the key server-side, so this is the call
+    that turns a bare key into the `org_id` every other operation needs."""
+    identity = {
+        "organization_id": "org-a",
+        "organization_name": "Org A",
+        "permission": "read",
+        "key_name": "cli-key",
+    }
+    with _platform_reply(200, identity) as transport:
+        result = _platform_client().whoami()
+
+    assert result == identity
+    url = transport.request.call_args.kwargs["url"]
+    # No organisation segment: putting one there would defeat the point.
+    assert url.endswith("/api/v1/unstract/whoami/"), url
+
+
+def test_list_deployments_sends_the_organisation_and_reads_the_page():
+    page = {
+        "count": 1,
+        "next": None,
+        "previous": None,
+        "results": [
+            {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "api_name": "invoice-parser",
+                "display_name": "Invoice Parser",
+                "description": "",
+                "is_active": True,
+                "api_endpoint": "https://example.unstract.com/deployment/api/org-a/invoice-parser/",
+                "workflow": "22222222-2222-2222-2222-222222222222",
+                "workflow_name": "wf",
+                "created_by": 1,
+                "created_by_email": "a@b.c",
+                "co_owners_count": 0,
+                "is_owner": True,
+                "last_run_time": None,
+                "run_count": 0,
+                "last_5_run_statuses": [],
+            }
+        ],
+    }
+    with _platform_reply(200, page) as transport:
+        result = _platform_client().list_deployments("org-a", api_name="invoice-parser")
+
+    assert result["count"] == 1
+    assert result["results"][0]["api_name"] == "invoice-parser"
+    called = transport.request.call_args.kwargs
+    assert "/org-a/" in called["url"], called["url"]
+    assert called["params"]["api_name"] == "invoice-parser"
+
+
+def test_a_missing_platform_key_is_refused_at_construction():
+    """Rather than at the first call, where it would look like a server refusal."""
+    with patch.dict(os.environ, {}, clear=True):
+        with pytest.raises(APIDeploymentsClientException) as caught:
+            PlatformAPIClient(base_url="https://example.unstract.com")
+    assert "UNSTRACT_PLATFORM_KEY" in str(caught.value)
+
+
+def test_the_platform_key_is_taken_from_the_environment_when_unset():
+    with patch.dict(os.environ, {"UNSTRACT_PLATFORM_KEY": "pk-from-env"}, clear=True):
+        client = PlatformAPIClient(base_url="https://example.unstract.com")
+    assert client.api_key == "pk-from-env"
+
+
+def test_a_base_url_without_a_host_is_refused():
+    with pytest.raises(APIDeploymentsClientException):
+        _platform_client(base_url="not-a-url")
+
+
+def test_a_path_on_the_base_url_is_discarded():
+    """These operations carry their own paths; keeping a caller's would produce
+    a URL no deployment serves."""
+    client = _platform_client(
+        base_url="https://example.unstract.com/deployment/api/x/y/"
+    )
+    assert client.base_url == "https://example.unstract.com"

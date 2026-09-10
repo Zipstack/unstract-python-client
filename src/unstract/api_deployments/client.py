@@ -3,8 +3,15 @@ platform.
 
 Classes:
     APIDeploymentsClient: A class to invoke APIs deployed on the Unstract platform.
-    APIDeploymentsClientException: A class to handle exceptions raised by the
-        APIDeploymentsClient class.
+    PlatformAPIClient: A class to read the account a platform API key belongs to
+        and the deployments in it.
+    APIDeploymentsClientException: A class to handle exceptions raised by both
+        client classes.
+
+The two clients take different credentials and are not interchangeable. A
+deployment key runs one deployment and cannot describe the account; a platform
+key describes the account and lists what is in it but cannot run anything. That
+split is the API's, not this module's.
 """
 
 import json
@@ -46,7 +53,12 @@ from tenacity import (
 from tenacity.wait import wait_base
 
 from unstract.api_deployments._sdk_docstudio import AuthenticatedClient
-from unstract.api_deployments._sdk_docstudio.api.deployment import execute, status
+from unstract.api_deployments._sdk_docstudio.api.deployment import (
+    execute,
+    list_deployments,
+    status,
+)
+from unstract.api_deployments._sdk_docstudio.api.identity import whoami
 from unstract.api_deployments._sdk_docstudio.models import ExecuteRequest
 from unstract.api_deployments._sdk_docstudio.types import UNSET, File, Unset
 from unstract.api_deployments.utils import UnstractUtils
@@ -164,7 +176,14 @@ def _error_text(body: Any, response) -> str:
             value = body.get(key)
             if isinstance(value, str) and value:
                 return value
-    return (response.text or "").strip()[:_ERROR_TEXT_LIMIT]
+    # `.text` on an httpx response, `.content` on the generated `Response`
+    # wrapper -- which is an attrs class, not an httpx one, and carries only
+    # bytes. Without this the platform facade raises AttributeError while
+    # reporting a refusal, turning a 401 into a crash.
+    text = getattr(response, "text", None)
+    if text is None:
+        text = (getattr(response, "content", b"") or b"").decode("utf-8", "replace")
+    return (text or "").strip()[:_ERROR_TEXT_LIMIT]
 
 
 class APIDeploymentsClientException(Exception):
@@ -923,3 +942,171 @@ class APIDeploymentsClient:
             )
 
         return obj_to_return
+
+
+class PlatformAPIClient:
+    """Read the account a platform API key belongs to, and its deployments.
+
+    Separate from `APIDeploymentsClient` because the credential and the URL
+    shape are both different: that class takes a deployment key and derives an
+    organisation and API name from a deployment URL, while these operations take
+    a platform key and address the account. Folding them together would mean a
+    class whose required `api_url` is meaningless for half its methods.
+
+    Both credentials are HTTP bearer, so the generated transport is shared.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str | None = None,
+        *,
+        verify: bool = True,
+        transport_timeout: float | None = None,
+        logging_level: str = "INFO",
+    ) -> None:
+        """
+        Args:
+            base_url (str): Scheme and host of the Unstract deployment, e.g.
+                ``https://us-central.unstract.com``. A path is ignored: these
+                operations carry their own, and the generated transport joins
+                them onto the origin.
+            api_key (str | None): Platform API key. Falls back to
+                ``$UNSTRACT_PLATFORM_KEY``, matching how `APIDeploymentsClient`
+                falls back for the deployment key.
+            verify (bool): Verify TLS certificates.
+            transport_timeout (float | None): Seconds before a stalled
+                connection is given up on. Unset means no bound.
+            logging_level (str): Level for this client's logger.
+        """
+        self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(getattr(logging, logging_level.upper(), logging.INFO))
+
+        if api_key is None:
+            self.api_key = os.getenv("UNSTRACT_PLATFORM_KEY", "")
+        else:
+            self.api_key = api_key
+        if not self.api_key:
+            raise APIDeploymentsClientException(
+                "A platform API key is required: pass api_key or set "
+                "$UNSTRACT_PLATFORM_KEY."
+            )
+        self.logger.debug(
+            "Platform key set to: " + UnstractUtils.redact_key(self.api_key)
+        )
+
+        parsed = urlparse(base_url)
+        if not parsed.scheme or not parsed.netloc:
+            raise APIDeploymentsClientException(
+                f"base_url must include a scheme and host, got {base_url!r}."
+            )
+        self.base_url = parsed.scheme + "://" + parsed.netloc
+
+        self.verify = verify
+        self.transport_timeout = transport_timeout
+        self._transport_client: AuthenticatedClient | None = None
+        self._transport_lock = threading.Lock()
+
+    @property
+    def _transport(self) -> AuthenticatedClient:
+        """The HTTP client, built on first use and under a lock.
+
+        Same reasoning as `APIDeploymentsClient._transport`: two threads racing
+        the first call would each build a pool and one would be dropped while
+        still holding its sockets.
+        """
+        if self._transport_client is None:
+            with self._transport_lock:
+                if self._transport_client is None:
+                    self._transport_client = AuthenticatedClient(
+                        base_url=self.base_url,
+                        token=self.api_key,
+                        verify_ssl=self.verify,
+                        timeout=httpx.Timeout(self.transport_timeout),
+                        raise_on_unexpected_status=False,
+                        follow_redirects=True,
+                    )
+        return self._transport_client
+
+    def _parsed_or_raise(self, response, what: str) -> Any:
+        """The parsed body of a 2xx, or an exception naming why it was refused.
+
+        `raise_on_unexpected_status` is off on the shared transport, so a
+        refusal arrives as an ordinary response. Without this every caller would
+        have to re-derive that check, and a 401 would read as an empty result.
+        """
+        if not 200 <= response.status_code < 300:
+            # `parsed` is a generated model, and `_error_text` reads mappings;
+            # handed the model it would fall through to the raw body and drop
+            # the reason the endpoint actually sent.
+            body = response.parsed
+            if hasattr(body, "to_dict"):
+                body = body.to_dict()
+            raise APIDeploymentsClientException(
+                f"{what} failed with {response.status_code}: "
+                f"{_error_text(body, response)}"
+            )
+        if response.parsed is None:
+            raise APIDeploymentsClientException(
+                f"{what} returned {response.status_code} with no readable body."
+            )
+        return response.parsed
+
+    def whoami(self) -> dict:
+        """The organisation this key belongs to, and the key's own scope.
+
+        The organisation is read from the key row server-side, so this takes no
+        organisation argument -- resolving one is the point of the call. Use it
+        to obtain the ``org_id`` that `list_deployments` needs.
+
+        Returns:
+            dict: ``organization_id``, ``organization_name``, ``permission``
+                and ``key_name``.
+        """
+        self.logger.debug("Resolving identity via /unstract/whoami/")
+        response = whoami.sync_detailed(client=self._transport)
+        return self._parsed_or_raise(response, "whoami").to_dict()
+
+    def list_deployments(
+        self,
+        org_id: str,
+        *,
+        api_name: str | Unset = UNSET,
+        search: str | Unset = UNSET,
+        ordering: str | Unset = UNSET,
+        page: int | Unset = UNSET,
+        page_size: int | Unset = UNSET,
+        workflow: Any | Unset = UNSET,
+    ) -> dict:
+        """The API deployments in one organisation.
+
+        The keyword arguments are the query parameters the endpoint accepts,
+        named as the API names them; one left unset is not sent, so the server
+        picks its own default. The result is paginated -- read ``next`` rather
+        than assuming ``results`` is the whole set.
+
+        Args:
+            org_id (str): Organisation to list within. `whoami` resolves this
+                from the key.
+            api_name (str): Return only the deployment with this exact API name.
+            search (str): Free-text filter.
+            ordering (str): Field to order by.
+            page (int): 1-based page number.
+            page_size (int): Rows per page.
+            workflow (UUID): Return only deployments of this workflow.
+
+        Returns:
+            dict: ``count``, ``next``, ``previous`` and ``results``.
+        """
+        self.logger.debug("Listing deployments for organisation: " + org_id)
+        response = list_deployments.sync_detailed(
+            org_id,
+            client=self._transport,
+            api_name=api_name,
+            search=search,
+            ordering=ordering,
+            page=page,
+            page_size=page_size,
+            workflow=workflow,
+        )
+        return self._parsed_or_raise(response, "list_deployments").to_dict()

@@ -117,14 +117,15 @@ def sync_detailed(
     include_metadata: bool | Unset = False,
     include_metrics: bool | Unset = False,
 ) -> Response[AcknowledgedResponse | ErrorResponse | StatusResponse]:
-    """Read the result of a previously started execution.
+    """Read the result of an execution
 
-    This read is one-shot: the first call that observes a completed execution acknowledges it and the
-    stored result is discarded, so every later call for that execution answers 406. Poll while the
-    execution is pending, and keep the payload of the call that returns it — it cannot be fetched again.
+     Reads a previously started execution, taking the same deployment key that ran it. The read is one-
+    shot: the first call that observes a completed execution acknowledges it and the stored result is
+    discarded, so every later call for that execution answers 406. Keep the payload of the call that
+    returns it — it cannot be fetched again.
 
     A still-running execution answers 422 carrying its current `status`, so a polling loop should treat
-    422 as the normal reply and stop on 200. Clients that raise on any non-2xx need to allow for that.
+    422 as the normal reply and stop on 200.
 
     Args:
         org_name (str):
@@ -168,14 +169,15 @@ def sync(
     include_metadata: bool | Unset = False,
     include_metrics: bool | Unset = False,
 ) -> AcknowledgedResponse | ErrorResponse | StatusResponse | None:
-    """Read the result of a previously started execution.
+    """Read the result of an execution
 
-    This read is one-shot: the first call that observes a completed execution acknowledges it and the
-    stored result is discarded, so every later call for that execution answers 406. Poll while the
-    execution is pending, and keep the payload of the call that returns it — it cannot be fetched again.
+     Reads a previously started execution, taking the same deployment key that ran it. The read is one-
+    shot: the first call that observes a completed execution acknowledges it and the stored result is
+    discarded, so every later call for that execution answers 406. Keep the payload of the call that
+    returns it — it cannot be fetched again.
 
     A still-running execution answers 422 carrying its current `status`, so a polling loop should treat
-    422 as the normal reply and stop on 200. Clients that raise on any non-2xx need to allow for that.
+    422 as the normal reply and stop on 200.
 
     Args:
         org_name (str):
@@ -214,14 +216,15 @@ async def asyncio_detailed(
     include_metadata: bool | Unset = False,
     include_metrics: bool | Unset = False,
 ) -> Response[AcknowledgedResponse | ErrorResponse | StatusResponse]:
-    """Read the result of a previously started execution.
+    """Read the result of an execution
 
-    This read is one-shot: the first call that observes a completed execution acknowledges it and the
-    stored result is discarded, so every later call for that execution answers 406. Poll while the
-    execution is pending, and keep the payload of the call that returns it — it cannot be fetched again.
+     Reads a previously started execution, taking the same deployment key that ran it. The read is one-
+    shot: the first call that observes a completed execution acknowledges it and the stored result is
+    discarded, so every later call for that execution answers 406. Keep the payload of the call that
+    returns it — it cannot be fetched again.
 
     A still-running execution answers 422 carrying its current `status`, so a polling loop should treat
-    422 as the normal reply and stop on 200. Clients that raise on any non-2xx need to allow for that.
+    422 as the normal reply and stop on 200.
 
     Args:
         org_name (str):
@@ -263,14 +266,15 @@ async def asyncio(
     include_metadata: bool | Unset = False,
     include_metrics: bool | Unset = False,
 ) -> AcknowledgedResponse | ErrorResponse | StatusResponse | None:
-    """Read the result of a previously started execution.
+    """Read the result of an execution
 
-    This read is one-shot: the first call that observes a completed execution acknowledges it and the
-    stored result is discarded, so every later call for that execution answers 406. Poll while the
-    execution is pending, and keep the payload of the call that returns it — it cannot be fetched again.
+     Reads a previously started execution, taking the same deployment key that ran it. The read is one-
+    shot: the first call that observes a completed execution acknowledges it and the stored result is
+    discarded, so every later call for that execution answers 406. Keep the payload of the call that
+    returns it — it cannot be fetched again.
 
     A still-running execution answers 422 carrying its current `status`, so a polling loop should treat
-    422 as the normal reply and stop on 200. Clients that raise on any non-2xx need to allow for that.
+    422 as the normal reply and stop on 200.
 
     Args:
         org_name (str):

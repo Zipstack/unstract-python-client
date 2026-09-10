@@ -120,7 +120,10 @@ def sync_detailed(
     client: AuthenticatedClient,
     body: ExecuteRequest | Unset = UNSET,
 ) -> Response[ErrorResponse | ExecuteResponse]:
-    """Execute an API deployment against one or more documents.
+    """Execute an API deployment against documents
+
+     Runs an API deployment. Takes a deployment key — either the deployment's own key, or a global API
+    deployment key that has access to it.
 
     Supply the documents either as `files` (multipart upload) or as `presigned_urls` (HTTPS S3 URLs), or
     both — a request carrying neither is rejected, and the two together may not exceed 32 documents.
@@ -164,7 +167,10 @@ def sync(
     client: AuthenticatedClient,
     body: ExecuteRequest | Unset = UNSET,
 ) -> ErrorResponse | ExecuteResponse | None:
-    """Execute an API deployment against one or more documents.
+    """Execute an API deployment against documents
+
+     Runs an API deployment. Takes a deployment key — either the deployment's own key, or a global API
+    deployment key that has access to it.
 
     Supply the documents either as `files` (multipart upload) or as `presigned_urls` (HTTPS S3 URLs), or
     both — a request carrying neither is rejected, and the two together may not exceed 32 documents.
@@ -203,7 +209,10 @@ async def asyncio_detailed(
     client: AuthenticatedClient,
     body: ExecuteRequest | Unset = UNSET,
 ) -> Response[ErrorResponse | ExecuteResponse]:
-    """Execute an API deployment against one or more documents.
+    """Execute an API deployment against documents
+
+     Runs an API deployment. Takes a deployment key — either the deployment's own key, or a global API
+    deployment key that has access to it.
 
     Supply the documents either as `files` (multipart upload) or as `presigned_urls` (HTTPS S3 URLs), or
     both — a request carrying neither is rejected, and the two together may not exceed 32 documents.
@@ -245,7 +254,10 @@ async def asyncio(
     client: AuthenticatedClient,
     body: ExecuteRequest | Unset = UNSET,
 ) -> ErrorResponse | ExecuteResponse | None:
-    """Execute an API deployment against one or more documents.
+    """Execute an API deployment against documents
+
+     Runs an API deployment. Takes a deployment key — either the deployment's own key, or a global API
+    deployment key that has access to it.
 
     Supply the documents either as `files` (multipart upload) or as `presigned_urls` (HTTPS S3 URLs), or
     both — a request carrying neither is rejected, and the two together may not exceed 32 documents.

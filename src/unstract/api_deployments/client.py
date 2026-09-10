@@ -176,10 +176,10 @@ def _error_text(body: Any, response) -> str:
             value = body.get(key)
             if isinstance(value, str) and value:
                 return value
-    # `.text` on an httpx response, `.content` on the generated `Response`
-    # wrapper -- which is an attrs class, not an httpx one, and carries only
-    # bytes. Without this the platform facade raises AttributeError while
-    # reporting a refusal, turning a 401 into a crash.
+    # Both facades hand this an httpx response, which has `.text`. The
+    # `.content` fallback is for the generated `Response` wrapper -- an attrs
+    # class carrying only bytes -- so passing one here reports the reason
+    # instead of raising AttributeError on the way to reporting it.
     text = getattr(response, "text", None)
     if text is None:
         text = (getattr(response, "content", b"") or b"").decode("utf-8", "replace")
@@ -953,7 +953,11 @@ class PlatformAPIClient:
     a platform key and address the account. Folding them together would mean a
     class whose required `api_url` is meaningless for half its methods.
 
-    Both credentials are HTTP bearer, so the generated transport is shared.
+    Everything else about the contract is deliberately the same as that class:
+    the request is issued through `_send`, so transport failures arrive as the
+    `requests` exception types callers already catch; the body is read as JSON
+    rather than through the generated response model; the credential is read per
+    request; and the pooled connections are released by `close`.
     """
 
     def __init__(
@@ -969,8 +973,8 @@ class PlatformAPIClient:
         Args:
             base_url (str): Scheme and host of the Unstract deployment, e.g.
                 ``https://us-central.unstract.com``. A path is ignored: these
-                operations carry their own, and the generated transport joins
-                them onto the origin.
+                operations carry their own, and the generated builders join them
+                onto the origin.
             api_key (str | None): Platform API key. Falls back to
                 ``$UNSTRACT_PLATFORM_KEY``, matching how `APIDeploymentsClient`
                 falls back for the deployment key.
@@ -1014,6 +1018,9 @@ class PlatformAPIClient:
         Same reasoning as `APIDeploymentsClient._transport`: two threads racing
         the first call would each build a pool and one would be dropped while
         still holding its sockets.
+
+        The token given here is not what authenticates a request -- `_send`
+        sets the header per call -- but `AuthenticatedClient` requires one.
         """
         if self._transport_client is None:
             with self._transport_lock:
@@ -1028,29 +1035,62 @@ class PlatformAPIClient:
                     )
         return self._transport_client
 
-    def _parsed_or_raise(self, response, what: str) -> Any:
-        """The parsed body of a 2xx, or an exception naming why it was refused.
+    def close(self) -> None:
+        """Release the pooled connections this client holds.
 
-        `raise_on_unexpected_status` is off on the shared transport, so a
-        refusal arrives as an ordinary response. Without this every caller would
-        have to re-derive that check, and a 401 would read as an empty result.
+        As on `APIDeploymentsClient`: the transport is kept between calls so
+        connections are reused, nothing else releases its sockets, and a client
+        built per job would otherwise accumulate pools. Safe to call twice.
         """
+        with self._transport_lock:
+            transport, self._transport_client = self._transport_client, None
+        if transport is not None:
+            transport.get_httpx_client().close()
+
+    def __enter__(self) -> "PlatformAPIClient":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+    def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Issue one request, translating transport failures on the way out.
+
+        The credential is read per request rather than captured with the
+        transport, so assigning ``api_key`` takes effect on the next call --
+        `AuthenticatedClient` bakes its own header on first use, which would
+        otherwise pin whatever key the client was built with.
+        """
+        kwargs["headers"] = {
+            **(kwargs.get("headers") or {}),
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        return _translate_transport_errors(
+            self._transport.get_httpx_client().request, method, url, **kwargs
+        )
+
+    def _read_or_raise(self, response: httpx.Response, what: str) -> Any:
+        """The JSON body of a 2xx, or an exception naming why it was refused.
+
+        The body is read directly rather than through the generated response
+        model, for the reason `APIDeploymentsClient._read_body` gives: a model
+        is built only for the statuses the spec declares, and its `from_dict`
+        indexes required keys with no default. A gateway answering 401 with HTML,
+        or the API answering with a DRF-shaped ``{"detail": ...}``, would raise
+        `JSONDecodeError` or `KeyError` out of the generated parser -- before
+        this facade ever sees the response -- instead of reporting a refusal.
+        """
+        body = APIDeploymentsClient._read_body(response)
         if not 200 <= response.status_code < 300:
-            # `parsed` is a generated model, and `_error_text` reads mappings;
-            # handed the model it would fall through to the raw body and drop
-            # the reason the endpoint actually sent.
-            body = response.parsed
-            if hasattr(body, "to_dict"):
-                body = body.to_dict()
             raise APIDeploymentsClientException(
                 f"{what} failed with {response.status_code}: "
                 f"{_error_text(body, response)}"
             )
-        if response.parsed is None:
+        if body is None:
             raise APIDeploymentsClientException(
-                f"{what} returned {response.status_code} with no readable body."
+                f"{what} returned {response.status_code} with a body that is not JSON."
             )
-        return response.parsed
+        return body
 
     def whoami(self) -> dict:
         """The organisation this key belongs to, and the key's own scope.
@@ -1064,8 +1104,9 @@ class PlatformAPIClient:
                 and ``key_name``.
         """
         self.logger.debug("Resolving identity via /unstract/whoami/")
-        response = whoami.sync_detailed(client=self._transport)
-        return self._parsed_or_raise(response, "whoami").to_dict()
+        request_kwargs = whoami._get_kwargs()
+        response = self._send(**request_kwargs)
+        return self._read_or_raise(response, "whoami")
 
     def list_deployments(
         self,
@@ -1099,9 +1140,8 @@ class PlatformAPIClient:
             dict: ``count``, ``next``, ``previous`` and ``results``.
         """
         self.logger.debug("Listing deployments for organisation: " + org_id)
-        response = list_deployments.sync_detailed(
+        request_kwargs = list_deployments._get_kwargs(
             org_id,
-            client=self._transport,
             api_name=api_name,
             search=search,
             ordering=ordering,
@@ -1109,4 +1149,5 @@ class PlatformAPIClient:
             page_size=page_size,
             workflow=workflow,
         )
-        return self._parsed_or_raise(response, "list_deployments").to_dict()
+        response = self._send(**request_kwargs)
+        return self._read_or_raise(response, "list_deployments")

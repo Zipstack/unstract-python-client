@@ -2025,9 +2025,14 @@ def test_whoami_returns_the_four_fields_the_spec_declares():
         result = _platform_client().whoami()
 
     assert result == identity
-    url = transport.request.call_args.kwargs["url"]
+    # Issued through `_send`, which passes method and url positionally the way
+    # the sibling client does.
+    method, url = transport.request.call_args.args[:2]
+    assert method == "get", method
     # No organisation segment: putting one there would defeat the point.
     assert url.endswith("/api/v1/unstract/whoami/"), url
+    sent = transport.request.call_args.kwargs["headers"]["Authorization"]
+    assert sent == "Bearer pk-test", sent
 
 
 def test_list_deployments_sends_the_organisation_and_reads_the_page():
@@ -2060,9 +2065,9 @@ def test_list_deployments_sends_the_organisation_and_reads_the_page():
 
     assert result["count"] == 1
     assert result["results"][0]["api_name"] == "invoice-parser"
-    called = transport.request.call_args.kwargs
-    assert "/org-a/" in called["url"], called["url"]
-    assert called["params"]["api_name"] == "invoice-parser"
+    url = transport.request.call_args.args[1]
+    assert "/org-a/" in url, url
+    assert transport.request.call_args.kwargs["params"]["api_name"] == "invoice-parser"
 
 
 def test_a_missing_platform_key_is_refused_at_construction():
@@ -2091,3 +2096,100 @@ def test_a_path_on_the_base_url_is_discarded():
         base_url="https://example.unstract.com/deployment/api/x/y/"
     )
     assert client.base_url == "https://example.unstract.com"
+
+
+# The findings below were raised on PR #29 and each fix is pinned here, so a
+# regression to the pre-review behaviour fails rather than passing quietly.
+
+
+@pytest.mark.parametrize(
+    ("label", "body_text"),
+    [
+        ("gateway_html", "<html><body>401 Unauthorized</body></html>"),
+        ("drf_shaped", '{"detail": "Invalid token."}'),
+        ("empty", ""),
+    ],
+)
+def test_an_error_body_the_model_cannot_parse_is_still_reported(label, body_text):
+    """The generated `_parse_response` builds `PlatformKeyError.from_dict(...)`
+    on a 401 with no guard: HTML raises `JSONDecodeError` and a DRF-shaped body
+    raises `KeyError: 'message'`, both out of the parser and before the facade
+    sees the response. Reading the body directly is what keeps a refused key a
+    reported refusal rather than a crash.
+    """
+    transport = MagicMock()
+    transport.request.return_value = httpx.Response(401, text=body_text)
+    with patch.object(AuthenticatedClient, "get_httpx_client", return_value=transport):
+        with pytest.raises(APIDeploymentsClientException) as caught:
+            _platform_client().whoami()
+    assert "401" in str(caught.value), label
+
+
+def test_a_transport_failure_arrives_as_the_requests_exception(monkeypatch):
+    """`APIDeploymentsClient` routes every request through
+    `_translate_transport_errors` so callers catch the `requests` classes they
+    document. Calling the generated `sync_detailed` directly would let raw
+    `httpx.ConnectError` escape, contradicting the module docstring.
+    """
+    transport = MagicMock()
+    transport.request.side_effect = httpx.ConnectError("nope")
+    with patch.object(AuthenticatedClient, "get_httpx_client", return_value=transport):
+        with pytest.raises(ConnectionError):
+            _platform_client().whoami()
+
+
+def test_the_platform_key_is_read_per_request_not_captured():
+    """`AuthenticatedClient` bakes its auth header on first use, so a key
+    reassigned after the transport was built would silently keep sending the
+    old one. `_send` sets the header per call for exactly this reason.
+    """
+    identity = {
+        "organization_id": "org-a",
+        "organization_name": "Org A",
+        "permission": "read",
+        "key_name": "k",
+    }
+    client = _platform_client(api_key="pk-first")
+    transport = MagicMock()
+    transport.request.return_value = _httpx_response(200, identity)
+    with patch.object(AuthenticatedClient, "get_httpx_client", return_value=transport):
+        client.whoami()
+        first = transport.request.call_args.kwargs["headers"]["Authorization"]
+        client.api_key = "pk-second"
+        client.whoami()
+        second = transport.request.call_args.kwargs["headers"]["Authorization"]
+
+    assert first == "Bearer pk-first"
+    assert second == "Bearer pk-second"
+
+
+def test_close_releases_the_pool_and_the_next_call_rebuilds_it():
+    """Nothing else releases the transport's sockets, and the CLI builds one
+    client per job."""
+    client = _platform_client()
+    inner = MagicMock()
+    with patch.object(AuthenticatedClient, "get_httpx_client", return_value=inner):
+        assert client._transport is not None
+        client.close()
+        inner.close.assert_called_once()
+    assert client._transport_client is None
+    # Safe twice, and idempotent.
+    client.close()
+
+
+def test_the_platform_client_is_a_context_manager():
+    with patch.object(
+        AuthenticatedClient, "get_httpx_client", return_value=MagicMock()
+    ):
+        with _platform_client() as client:
+            assert client._transport is not None
+        assert client._transport_client is None
+
+
+def test_both_clients_are_reachable_from_the_package_root():
+    """A class only importable from the private module is not a published
+    surface, and the sibling is re-exported."""
+    from unstract import api_deployments as pkg
+
+    assert pkg.PlatformAPIClient is PlatformAPIClient
+    assert pkg.APIDeploymentsClient is APIDeploymentsClient

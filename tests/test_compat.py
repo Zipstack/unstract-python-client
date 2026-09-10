@@ -1960,6 +1960,40 @@ def _platform_declared(operation_id: str) -> dict[int, str | None]:
     raise AssertionError(f"{operation_id} not declared in the spec")
 
 
+def _deployment_page() -> dict:
+    """One page of the listing, with every field `APIDeploymentSummary` requires.
+
+    Shared so the facade test and the generated-model tests read the same body:
+    a row that satisfies one and not the other would prove nothing about either.
+    """
+    return {
+        "count": 1,
+        "next": None,
+        "previous": None,
+        "results": [
+            {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "api_name": "invoice-parser",
+                "display_name": "Invoice Parser",
+                "description": "",
+                "is_active": True,
+                "api_endpoint": (
+                    "https://example.unstract.com/deployment/api/org-a/invoice-parser/"
+                ),
+                "workflow": "22222222-2222-2222-2222-222222222222",
+                "workflow_name": "wf",
+                "created_by": 1,
+                "created_by_email": "a@b.c",
+                "co_owners_count": 0,
+                "is_owner": True,
+                "last_run_time": None,
+                "run_count": 0,
+                "last_5_run_statuses": [],
+            }
+        ],
+    }
+
+
 def _platform_client(**kwargs):
     kwargs.setdefault("base_url", "https://example.unstract.com")
     kwargs.setdefault("api_key", "pk-test")
@@ -1971,9 +2005,15 @@ def _platform_client(**kwargs):
 def _platform_reply(status_code, json_data):
     """Answer the next generated request with this response.
 
-    Patched at `get_httpx_client` rather than at `sync_detailed`, so the
-    generated parsing and model construction still run -- that is the layer a
-    regeneration changes, and mocking above it would test nothing about it.
+    Patched at `get_httpx_client`, the lowest seam the facade owns, so the URL
+    the generated `_get_kwargs` built and the header `_send` attached are both
+    real and observable on `transport.request`.
+
+    It does **not** exercise the generated `_parse_response` or the response
+    models: `PlatformAPIClient` reads the body itself, deliberately, because
+    those parsers raise on an error body the spec did not declare. Their
+    coverage is `test_the_generated_platform_models_read_the_bodies_the_server_sends`
+    and `test_the_generated_platform_parsers_read_a_declared_response`.
     """
     transport = MagicMock()
     transport.request.return_value = _httpx_response(status_code, json_data)
@@ -2036,30 +2076,7 @@ def test_whoami_returns_the_four_fields_the_spec_declares():
 
 
 def test_list_deployments_sends_the_organisation_and_reads_the_page():
-    page = {
-        "count": 1,
-        "next": None,
-        "previous": None,
-        "results": [
-            {
-                "id": "11111111-1111-1111-1111-111111111111",
-                "api_name": "invoice-parser",
-                "display_name": "Invoice Parser",
-                "description": "",
-                "is_active": True,
-                "api_endpoint": "https://example.unstract.com/deployment/api/org-a/invoice-parser/",
-                "workflow": "22222222-2222-2222-2222-222222222222",
-                "workflow_name": "wf",
-                "created_by": 1,
-                "created_by_email": "a@b.c",
-                "co_owners_count": 0,
-                "is_owner": True,
-                "last_run_time": None,
-                "run_count": 0,
-                "last_5_run_statuses": [],
-            }
-        ],
-    }
+    page = _deployment_page()
     with _platform_reply(200, page) as transport:
         result = _platform_client().list_deployments("org-a", api_name="invoice-parser")
 
@@ -2193,3 +2210,118 @@ def test_both_clients_are_reachable_from_the_package_root():
 
     assert pkg.PlatformAPIClient is PlatformAPIClient
     assert pkg.APIDeploymentsClient is APIDeploymentsClient
+
+
+def test_the_generated_platform_models_read_the_bodies_the_server_sends():
+    """`PlatformAPIClient` reads bodies itself, so nothing else here would
+    notice a generated model that silently lost a field. They are still public
+    surface for anyone importing them, and the parity tests above cover only the
+    deployment models.
+    """
+    from unstract.api_deployments._sdk_docstudio.models import (
+        APIDeploymentSummary,
+        PaginatedAPIDeploymentSummaryList,
+        PlatformKeyError,
+        WhoAmIResponse,
+    )
+
+    # Only the `Literal` alias is re-exported from `models`; the value set and
+    # the validator live in the submodule.
+    from unstract.api_deployments._sdk_docstudio.models.api_key_permission import (
+        API_KEY_PERMISSION_VALUES,
+        check_api_key_permission,
+    )
+
+    identity = WhoAmIResponse.from_dict(
+        {
+            "organization_id": "org-a",
+            "organization_name": "Org A",
+            "permission": "read",
+            "key_name": "cli-key",
+        }
+    )
+    assert identity.organization_id == "org-a"
+    assert identity.organization_name == "Org A"
+    assert identity.key_name == "cli-key"
+    # The spec declares this a ChoiceField, and this generator renders such a
+    # field as a `Literal` alias plus a validator -- not an Enum class. So the
+    # value stays a plain string and the tier names are pinned separately.
+    assert identity.permission == "read"
+    assert API_KEY_PERMISSION_VALUES == {"read", "read_write", "full_access"}
+    assert check_api_key_permission("read_write") == "read_write"
+    with pytest.raises(TypeError):
+        check_api_key_permission("superuser")
+    assert not identity.additional_properties
+
+    # The middleware's own shape: a bare message, never the handler envelope.
+    refusal = PlatformKeyError.from_dict({"message": "the reason"})
+    assert refusal.message == "the reason"
+
+    page = PaginatedAPIDeploymentSummaryList.from_dict(_deployment_page())
+    assert page.count == 1
+    assert page.next_ is None
+    row = page.results[0]
+    assert isinstance(row, APIDeploymentSummary)
+    assert row.api_name == "invoice-parser"
+    assert row.is_active is True
+
+
+def test_the_generated_platform_parsers_read_a_declared_response():
+    """The parsers are what a caller reaching for `sync_detailed` gets, and this
+    PR generated two of them. Exercised directly rather than through the facade,
+    which reads the body itself.
+    """
+    from unstract.api_deployments._sdk_docstudio.api.deployment import list_deployments
+    from unstract.api_deployments._sdk_docstudio.api.identity import whoami
+    from unstract.api_deployments._sdk_docstudio.models import (
+        PaginatedAPIDeploymentSummaryList,
+        PlatformKeyError,
+        WhoAmIResponse,
+    )
+
+    identity_body = {
+        "organization_id": "org-a",
+        "organization_name": "Org A",
+        "permission": "read_write",
+        "key_name": "k",
+    }
+    client = AuthenticatedClient(base_url="https://example.unstract.com", token="pk")
+
+    parsed = whoami._parse_response(
+        client=client, response=_httpx_response(200, identity_body)
+    )
+    assert isinstance(parsed, WhoAmIResponse)
+    assert parsed.organization_id == "org-a"
+
+    refused = whoami._parse_response(
+        client=client, response=_httpx_response(401, {"message": "nope"})
+    )
+    assert isinstance(refused, PlatformKeyError)
+    assert refused.message == "nope"
+
+    listing = list_deployments._parse_response(
+        client=client, response=_httpx_response(200, _deployment_page())
+    )
+    assert isinstance(listing, PaginatedAPIDeploymentSummaryList)
+    assert listing.results[0].api_name == "invoice-parser"
+
+
+def test_the_generated_parsers_raise_on_an_undeclared_error_body():
+    """The reason `PlatformAPIClient` does not use them. `from_dict` indexes
+    required keys with no default and `response.json()` is unguarded, so a
+    gateway's HTML 401 or a DRF-shaped body reaches a caller of `sync_detailed`
+    as an exception rather than a refusal. Pinned so the facade's decision to
+    read the body itself stays justified rather than looking arbitrary.
+    """
+    from unstract.api_deployments._sdk_docstudio.api.identity import whoami
+
+    client = AuthenticatedClient(base_url="https://example.unstract.com", token="pk")
+
+    with pytest.raises(ValueError):
+        whoami._parse_response(
+            client=client, response=httpx.Response(401, text="<html>401</html>")
+        )
+    with pytest.raises(KeyError):
+        whoami._parse_response(
+            client=client, response=_httpx_response(401, {"detail": "Invalid token."})
+        )

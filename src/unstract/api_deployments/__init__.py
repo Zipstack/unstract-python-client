@@ -1,4 +1,4 @@
-__version__ = "1.7.0"
+__version__ = "1.7.1"
 
 from ._sdk_docstudio.models import (
     APIDeploymentSummary as APIDeploymentSummary,

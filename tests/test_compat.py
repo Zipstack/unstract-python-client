@@ -483,8 +483,12 @@ def test_the_withdrawn_option_is_refused_not_forwarded(sample_file):
         _client().structure_file([sample_file], use_file_history=True)
 
 
-def test_no_execute_part_is_the_withdrawn_option(sample_file):
-    """Neither the facade nor the generated request can put it on the wire."""
+def test_the_facade_neither_sends_nor_the_model_declares_the_withdrawn_option(
+    sample_file,
+):
+    """The generated model still forwards any unknown key a direct caller puts
+    in `additional_properties`; the claim here is only about the facade's
+    request and the model's declared fields."""
     parts = _execute_parts(_client(api_timeout=300), sample_file)
     assert "use_file_history" not in parts
     assert "use_file_history" not in _EXECUTE_SEND_ONLY

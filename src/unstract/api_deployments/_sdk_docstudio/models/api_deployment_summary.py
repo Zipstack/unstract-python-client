@@ -38,6 +38,7 @@ class APIDeploymentSummary:
             last_5_run_statuses (list[APIDeploymentSummaryLast5RunStatusesItem]): Fetch the last 5 execution statuses with
                 timestamps for this API deployment.
             last_run_time (None | str):
+            owner_emails (list[str]): Email of each owner, earliest first. Empty if none is a person.
             run_count (int):
             workflow (UUID):
             workflow_name (str):
@@ -55,6 +56,7 @@ class APIDeploymentSummary:
     is_owner: bool
     last_5_run_statuses: list[APIDeploymentSummaryLast5RunStatusesItem]
     last_run_time: None | str
+    owner_emails: list[str]
     run_count: int
     workflow: UUID
     workflow_name: str
@@ -91,6 +93,8 @@ class APIDeploymentSummary:
         last_run_time: None | str
         last_run_time = self.last_run_time
 
+        owner_emails = self.owner_emails
+
         run_count = self.run_count
 
         workflow = str(self.workflow)
@@ -113,6 +117,7 @@ class APIDeploymentSummary:
                 "is_owner": is_owner,
                 "last_5_run_statuses": last_5_run_statuses,
                 "last_run_time": last_run_time,
+                "owner_emails": owner_emails,
                 "run_count": run_count,
                 "workflow": workflow,
                 "workflow_name": workflow_name,
@@ -176,6 +181,8 @@ class APIDeploymentSummary:
 
         last_run_time = _parse_last_run_time(d.pop("last_run_time"))
 
+        owner_emails = cast(list[str], d.pop("owner_emails"))
+
         run_count = d.pop("run_count")
 
         workflow = UUID(d.pop("workflow"))
@@ -195,6 +202,7 @@ class APIDeploymentSummary:
             is_owner=is_owner,
             last_5_run_statuses=last_5_run_statuses,
             last_run_time=last_run_time,
+            owner_emails=owner_emails,
             run_count=run_count,
             workflow=workflow,
             workflow_name=workflow_name,

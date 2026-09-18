@@ -34,7 +34,6 @@ class ExecuteRequest:
             presigned_urls (list[str] | Unset):
             tags (str | Unset): Comma-separated list of tag names (EX:'tag1,tag2-name,tag3_name') Default: ''.
             timeout (int | Unset):  Default: -1.
-            use_file_history (bool | Unset):  Default: False.
     """
 
     custom_data: Any | Unset = UNSET
@@ -48,7 +47,6 @@ class ExecuteRequest:
     presigned_urls: list[str] | Unset = UNSET
     tags: str | Unset = ""
     timeout: int | Unset = -1
-    use_file_history: bool | Unset = False
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -94,8 +92,6 @@ class ExecuteRequest:
 
         timeout = self.timeout
 
-        use_file_history = self.use_file_history
-
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update({})
@@ -121,8 +117,6 @@ class ExecuteRequest:
             field_dict["tags"] = tags
         if timeout is not UNSET:
             field_dict["timeout"] = timeout
-        if use_file_history is not UNSET:
-            field_dict["use_file_history"] = use_file_history
 
         return field_dict
 
@@ -225,14 +219,6 @@ class ExecuteRequest:
         if not isinstance(self.timeout, Unset):
             files.append(("timeout", (None, str(self.timeout).encode(), "text/plain")))
 
-        if not isinstance(self.use_file_history, Unset):
-            files.append(
-                (
-                    "use_file_history",
-                    (None, str(self.use_file_history).encode(), "text/plain"),
-                )
-            )
-
         for prop_name, prop in self.additional_properties.items():
             files.append((prop_name, (None, str(prop).encode(), "text/plain")))
 
@@ -291,8 +277,6 @@ class ExecuteRequest:
 
         timeout = d.pop("timeout", UNSET)
 
-        use_file_history = d.pop("use_file_history", UNSET)
-
         execute_request = cls(
             custom_data=custom_data,
             files=files,
@@ -305,7 +289,6 @@ class ExecuteRequest:
             presigned_urls=presigned_urls,
             tags=tags,
             timeout=timeout,
-            use_file_history=use_file_history,
         )
 
         execute_request.additional_properties = d

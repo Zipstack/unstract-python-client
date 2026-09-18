@@ -36,6 +36,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
+import attrs
 import httpx
 import pytest
 import requests
@@ -58,6 +59,7 @@ from unstract.api_deployments import (
     WhoAmIResponse,
 )
 from unstract.api_deployments._sdk_docstudio import AuthenticatedClient
+from unstract.api_deployments._sdk_docstudio.models import ExecuteRequest
 from unstract.api_deployments._sdk_docstudio.types import UNSET
 from unstract.api_deployments.client import (
     _EXECUTE_SEND_ONLY,
@@ -469,11 +471,28 @@ def test_a_requested_parameter_is_sent(sample_file):
         sample_file,
         tags="a,b",
         llm_profile_id="profile-1",
-        use_file_history=True,
     )
     assert parts["tags"][1] == b"a,b"
     assert parts["llm_profile_id"][1] == b"profile-1"
-    assert parts["use_file_history"][1] == b"True"
+
+
+def test_the_withdrawn_option_is_refused_not_forwarded(sample_file):
+    """`use_file_history` is internal-only and no longer in the published spec.
+    Accepting it here would send a field the contract does not declare."""
+    with pytest.raises(TypeError):
+        _client().structure_file([sample_file], use_file_history=True)
+
+
+def test_the_facade_neither_sends_nor_the_model_declares_the_withdrawn_option(
+    sample_file,
+):
+    """The generated model still forwards any unknown key a direct caller puts
+    in `additional_properties`; the claim here is only about the facade's
+    request and the model's declared fields."""
+    parts = _execute_parts(_client(api_timeout=300), sample_file)
+    assert "use_file_history" not in parts
+    assert "use_file_history" not in _EXECUTE_SEND_ONLY
+    assert "use_file_history" not in attrs.fields_dict(ExecuteRequest)
 
 
 @pytest.mark.parametrize(
@@ -1994,6 +2013,7 @@ def _deployment_page() -> dict:
                 "created_by_email": "a@b.c",
                 "co_owners_count": 0,
                 "is_owner": True,
+                "owner_emails": ["a@b.c"],
                 "last_run_time": None,
                 "run_count": 0,
                 "last_5_run_statuses": [],

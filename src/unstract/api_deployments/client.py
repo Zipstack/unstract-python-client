@@ -616,7 +616,6 @@ class APIDeploymentsClient(_HttpxFacade):
         include_metadata: bool | Unset = UNSET,
         include_metrics: bool | Unset = UNSET,
         include_extracted_text: bool | Unset = UNSET,
-        use_file_history: bool | Unset = UNSET,
         tags: str | Unset = UNSET,
         llm_profile_id: str | None | Unset = UNSET,
         hitl_queue_name: str | None | Unset = UNSET,
@@ -638,7 +637,6 @@ class APIDeploymentsClient(_HttpxFacade):
             include_metadata (bool): Include metadata in the result.
             include_metrics (bool): Include metrics in the result.
             include_extracted_text (bool): Include the extracted text.
-            use_file_history (bool): Reuse a previous result for the same file.
             tags (str): Comma-separated tag names.
             llm_profile_id (str): LLM profile to override the deployment's.
             hitl_queue_name (str): Human-in-the-loop queue to route the file to.
@@ -662,7 +660,6 @@ class APIDeploymentsClient(_HttpxFacade):
             "include_metadata": include_metadata,
             "include_metrics": include_metrics,
             "include_extracted_text": include_extracted_text,
-            "use_file_history": use_file_history,
             "tags": tags,
             "llm_profile_id": llm_profile_id,
             "hitl_queue_name": hitl_queue_name,
